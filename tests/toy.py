@@ -1,0 +1,178 @@
+"""A tiny grammar used across the tests.
+
+Approximates a 1-D signal with a piecewise-constant function whose number of
+segments is decided by the grammar rather than fixed up front.
+
+It is chosen to mirror the real thing: ``Split`` divides a segment into two
+halves carrying the *same* value, so it is **exactly loss-preserving at the
+moment it fires** -- the represented function is unchanged and only the number of
+free parameters grows. That is the property the whole algorithm rests on, and it
+means a test can assert that no accepted rewrite ever spikes the loss.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from typing import Any
+
+import torch
+
+from d4d import AcceptRule, ExtraMetrics, Grammar, ListCollection, ListSpec, StepContext
+
+
+@dataclass(frozen=True)
+class Piecewise:
+    """``len(edges) == len(values) + 1``; edges are increasing and span [0, 1]."""
+
+    edges: tuple[float, ...]
+    values: torch.Tensor
+
+    @property
+    def n(self) -> int:
+        return len(self.values)
+
+
+@dataclass(frozen=True)
+class Split:
+    """Halve segment ``i``, both halves keeping its current value."""
+
+    i: int
+
+
+@dataclass(frozen=True)
+class Remove:
+    """Merge segment ``i`` into its right neighbour, averaging by width."""
+
+    i: int
+
+
+class PiecewiseGrammar(Grammar[Piecewise, ListCollection[Piecewise], Any, None]):
+    """Fit ``target`` sampled on ``xs``, trading accuracy against segment count."""
+
+    list_spec = ListSpec(
+        params_of=lambda o: [o.values],
+        with_params=lambda o, ts: replace(o, values=ts[0]),
+        names=("values",),
+    )
+    incremental_apply = False
+    accept_rule = AcceptRule(abs_eps=1e-9)
+
+    def __init__(
+        self,
+        target: torch.Tensor,
+        n_initial: int = 1,
+        w_segment: float = 0.0,
+        max_segments: int = 64,
+        allow_remove: bool = True,
+    ) -> None:
+        self.target = target
+        self.xs = (torch.arange(len(target), dtype=torch.float32) + 0.5) / len(target)
+        self.n_initial = n_initial
+        self.w_segment = w_segment
+        self.max_segments = max_segments
+        self.allow_remove = allow_remove
+        self.visualize_calls = 0
+
+    # -- construction ------------------------------------------------------
+    def initial(self) -> Piecewise:
+        n = self.n_initial
+        edges = tuple(i / n for i in range(n + 1))
+        return Piecewise(edges=edges, values=torch.full((n,), float(self.target.mean())))
+
+    # -- rewriting ---------------------------------------------------------
+    def propose(self, obj: Piecewise, budget: int) -> list[Any]:
+        out: list[Any] = []
+        if obj.n < self.max_segments:
+            out.extend(Split(i) for i in range(obj.n))
+        if self.allow_remove and obj.n > 1:
+            out.extend(Remove(i) for i in range(obj.n - 1))
+        if budget > 0 and len(out) > budget:
+            out = out[:budget]
+        return out
+
+    def apply(self, obj: Piecewise, rewrite: Any) -> Piecewise:
+        if isinstance(rewrite, Split):
+            i = rewrite.i
+            mid = 0.5 * (obj.edges[i] + obj.edges[i + 1])
+            edges = obj.edges[: i + 1] + (mid,) + obj.edges[i + 1 :]
+            v = obj.values.detach()
+            values = torch.cat([v[:i], v[i : i + 1], v[i : i + 1], v[i + 1 :]])
+            return Piecewise(edges=edges, values=values)
+        if isinstance(rewrite, Remove):
+            i = rewrite.i
+            w0 = obj.edges[i + 1] - obj.edges[i]
+            w1 = obj.edges[i + 2] - obj.edges[i + 1]
+            v = obj.values.detach()
+            merged = (v[i] * w0 + v[i + 1] * w1) / (w0 + w1)
+            edges = obj.edges[: i + 1] + obj.edges[i + 2 :]
+            values = torch.cat([v[:i], merged.reshape(1), v[i + 2 :]])
+            return Piecewise(edges=edges, values=values)
+        raise ValueError(f"unknown rewrite {rewrite!r}")
+
+    def conflicts(self, a: Any, b: Any) -> bool:
+        """Rewrites touching neighbouring segments interfere, because indices shift."""
+        return abs(a.i - b.i) <= 1
+
+    def apply_all(
+        self, base: Piecewise, rewrites: Sequence[Any], improvements: Sequence[float]
+    ) -> Piecewise:
+        # Apply right-to-left so earlier indices stay valid as segments are
+        # inserted and removed.
+        out = base
+        for rewrite in sorted(rewrites, key=lambda r: -r.i):
+            out = self.apply(out, rewrite)
+        return out
+
+    # -- evaluation --------------------------------------------------------
+    def _predict(self, obj: Piecewise) -> torch.Tensor:
+        edges = torch.tensor(obj.edges[1:-1], dtype=torch.float32)
+        idx = torch.searchsorted(edges, self.xs.contiguous())
+        return obj.values[idx]
+
+    def loss(
+        self, batch: ListCollection[Piecewise], ctx: StepContext, state: None
+    ) -> tuple[torch.Tensor, ExtraMetrics]:
+        losses = torch.stack([((self._predict(o) - self.target) ** 2).mean() for o in batch.objects])
+        extra: dict[str, Sequence[float]] = {}
+        if ctx.compute_extra:
+            extra["n_segments"] = [float(o.n) for o in batch.objects]
+        return losses, extra
+
+    def simplicity(self, batch: ListCollection[Piecewise], ctx: StepContext) -> Sequence[float]:
+        return [self.w_segment * o.n for o in batch.objects]
+
+    def visualize(
+        self, batch: ListCollection[Piecewise], ctx: StepContext, state: None
+    ) -> Any | None:
+        import numpy as np
+
+        self.visualize_calls += 1
+        pred = self._predict(batch.objects[0]).detach().numpy()
+        row = (255 * (pred - pred.min()) / max(float(np.ptp(pred)), 1e-9)).astype(np.uint8)
+        return np.repeat(row[None, :, None], 3, axis=2).repeat(8, axis=0)
+
+    def config(self) -> dict[str, Any]:
+        return {"n_initial": self.n_initial, "w_segment": self.w_segment,
+                "max_segments": self.max_segments}
+
+
+def step_target(n: int = 64) -> torch.Tensor:
+    """A monotone 4-level staircase: exact with 4 segments, hopeless with 1.
+
+    Monotonicity is deliberate. A *balanced* staircase such as
+    ``[0, 1, 0.25, 0.75]`` has the property that the optimal value of each half
+    equals the optimal value of the whole, so the first Split yields exactly zero
+    improvement and can never be accepted -- the grammar deadlocks at one segment
+    through no fault of the optimizer. Monotone levels make every split pay.
+    """
+    t = torch.zeros(n)
+    q = n // 4
+    for k, v in enumerate([0.0, 0.3, 0.6, 1.0]):
+        t[k * q : (k + 1) * q] = v
+    return t
+
+
+def ramp_target(n: int = 32) -> torch.Tensor:
+    """A linear ramp -- never exactly representable, so the loss plateaus positive."""
+    return torch.linspace(0.0, 1.0, n)
