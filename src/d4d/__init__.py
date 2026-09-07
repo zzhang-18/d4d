@@ -46,7 +46,6 @@ from .collection import ListCollection, ListSpec, ObjectCollection, batchify
 from .combine import DEFAULT_ACCEPT_RULE, REJECT, AcceptRule, greedy_combine
 from .grammar import ExtraMetrics, Grammar, Phase, StepContext
 from .optimize import OptimizeArgs, OptimizeResult, optimize
-from .retry import run_with_oom_backoff
 from .scheduler import AdaptiveLRScheduler
 from .serialize import to_jsonable
 
@@ -59,7 +58,7 @@ __all__ = [
     "ObjectCollection", "ListCollection", "ListSpec", "batchify",
     "AcceptRule", "DEFAULT_ACCEPT_RULE", "REJECT", "greedy_combine",
     "OptimizeArgs", "OptimizeResult", "optimize",
-    "AdaptiveLRScheduler", "run_with_oom_backoff", "to_jsonable",
+    "AdaptiveLRScheduler", "to_jsonable",
     # callbacks
     "Callback", "CallbackList", "StopRun",
     "RunStart", "StepEnd", "VisualizeEvent", "RewriteEvent", "RunEnd",

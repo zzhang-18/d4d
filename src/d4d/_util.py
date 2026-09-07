@@ -1,9 +1,4 @@
-"""Small helpers the optimizer needs.
-
-Deliberately tiny. The upstream ``d4descent.util`` is a 342-line grab bag whose
-module-level ``import skvideo.io`` / ``import cairosvg`` make importing the
-optimizer expensive; only these four helpers are actually load-bearing.
-"""
+"""Small helpers for the optimzer."""
 
 from __future__ import annotations
 

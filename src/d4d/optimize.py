@@ -1,24 +1,13 @@
 """The optimization loop.
 
-Alternates continuous gradient descent on an object's parameters with periodic
-discrete grammar rewrites. The premise, from the paper, is that a well-designed
-grammar fires a rewrite only when it is *loss-preserving at that moment* -- so the
-discrete jump costs nothing and descent simply continues in a larger space.
+Alternates gradient descent on differentiable parameters and discrete rewrites.
+Steps:
+1. if rewriting: check early stopping, ``propose``, score the candidates, ``combine``.
+2. periodically ``cleanup`` and rebuild the optimizer.
+3. take a continuous step.
+5. advance moving average, the LR scheduler and the grammar's state.
 
-One step, in order:
-
-1. decide whether this is a rewrite step
-2. periodically ``cleanup`` and rebuild the optimizer
-3. if rewriting: check early stopping, ``propose``, score the candidates, ``combine``
-4. take a continuous step: ``simplicity`` -> ``loss`` -> log -> maybe visualize
-   -> backward -> clip -> step -> project
-5. advance the moving average, the LR scheduler and the grammar's state
-
-Scoring a candidate means actually optimizing it: ``proposal_steps`` real
-gradient steps on a batch of candidates, then re-evaluating. The base object is
-appended *last* to the candidate list so it is measured under exactly the same
-conditions -- same batch, same state, same step -- as everything it is compared
-against. That invariant is load-bearing and is preserved from upstream.
+Scoring a candidate amounts to doing ``proposal_steps`` gradient descent steps.
 """
 
 from __future__ import annotations
@@ -60,72 +49,64 @@ MetricSeries = dict[str, tuple[float, ...]]
 
 @dataclass
 class OptimizeArgs:
-    """Algorithm hyperparameters. Grammar hyperparameters live on the grammar."""
+    """Optimization hyperparams"""
 
     n_steps: int = 4000
 
-    # -- continuous optimization -------------------------------------------
-    optimizer: Literal["Adam", "SGD"] = "SGD"
-    scheduler: Literal["none", "ReduceLROnPlateau", "AdaptiveLR", "LinearLR", "ExponentialLR"] = "ReduceLROnPlateau"
+    # GD-related
+    optimizer: Literal["Adam", "SGD"] = "Adam"
+    scheduler: Literal["none", "ReduceLROnPlateau", "AdaptiveLR", "LinearLR", "ExponentialLR"] = "none"
     lr: float = 0.5
     clip_grad: float | None = 2.0
+    """'rel' divides the clip value by the current LR, bounding the step size
+    # rather than the gradient, which keeps behavior stable as LR decays."""
     clip_grad_mode: Literal["abs", "rel"] = "abs"
-    """``"rel"`` divides the clip value by the current LR, bounding the *step size*
-    rather than the gradient -- which keeps behaviour stable as the LR decays."""
     reduce_lr_factor: float = 0.5
     reduce_lr_patience: int = 2
     reduce_lr_min_lr: float = 1e-4
     increase_lr_patience: int = 2
     reset_lr_after_proposal: bool = False
-    increase_lr_after_proposal: bool = True
     """A rewrite changes the landscape, so an LR that had decayed onto a plateau is
-    probably too small for the new one. Nudges it back up one notch."""
+    probably too small for the new one, this nudges it back up."""
+    increase_lr_after_proposal: bool = True
 
-    # -- cleanup -----------------------------------------------------------
+    # Clean up
     cleanup_every: int = 10
 
-    # -- proposals ---------------------------------------------------------
+    # Proposal (rewrites)
     proposal_trigger: Literal["step", "rel_loss"] = "step"
     propose_every: int = 50
     proposal_rel_loss: float = 5e-3
     proposal_patience: int = 10
+    """ Criteria for scoring candidates. 'loss' optimizes for 'proposal_steps' and
+    checks loss. 'grad' uses 'loss - lr * <g, g>' from a single backward pass.
+    'grad_only' scores on grad alone.
+    """
     proposal_criterion: Literal["loss", "grad", "grad_only"] = "loss"
-    """How to score a candidate. ``"loss"`` optimizes it for ``proposal_steps`` and
-    measures the result -- accurate, and the only fair option for a rewrite whose
-    benefit appears only after the new parameters move. ``"grad"`` uses the
-    first-order surrogate ``loss - lr * <g, g>`` from a single backward pass, which
-    is far cheaper; ``"grad_only"`` drops the loss term and ranks on predicted
-    descent alone."""
     proposal_steps: int = 2
+    """Number of candidates to evaluate, '0' means all."""
     proposal_size: int = 0
-    """Number of candidates to evaluate; ``0`` means all the grammar offers."""
     proposal_clip_grad: bool = True
+    """Maximum rewrites accepted per rewrite step, '0' means unlimited."""
     accept_top_k: int = 0
-    """Maximum rewrites accepted per rewrite step; ``0`` means unlimited.
 
-    Replaces the upstream boolean ``proposal_accept_parallel``, whose disagreement
-    with the ``select_top_k`` integer that ``combine_proposals`` actually took made
-    three grammars raise ``TypeError`` at their first rewrite. One integer makes
-    that drift unrepresentable."""
-
-    # -- batching ----------------------------------------------------------
+    # Batching
+    """Budget per batch in units of 'Grammar.object_cost'. Ignored when
+    'batch_size' is set."""
     cost_budget: int = 8192
-    """Budget per batch in units of ``Grammar.object_cost``. Ignored when
-    ``batch_size`` is set."""
     batch_size: int | None = None
 
-    # -- simplicity --------------------------------------------------------
+    # Simplicity
     w_simplicity: float = 1.0
 
-    # -- visualization -----------------------------------------------------
+    # Visualization
     visualize_every: int = 10
 
-    # -- early stopping ----------------------------------------------------
+    # Early stopping
     stopping_eps: float = 5e-3
+    """Stop after this many consecutive rewrites without improvement. 'None'
+    disables early stopping."""
     stopping_patience: int | None = None
-    """Stop after this many consecutive rewrites without improvement. ``None``
-    disables early stopping. Counted in rewrites rather than steps, because
-    progress *between* rewrites is the thing that matters."""
 
     seed: int | None = None
 
@@ -144,23 +125,14 @@ class OptimizeArgs:
 
 @dataclass
 class OptimizeResult(Generic[TObject]):
-    """What a run produced."""
-
     best: TObject
-    """The object with the lowest recorded ``$loss``. Genuinely the best, unlike
-    upstream, which returned whatever the last step happened to hold."""
     best_loss: float
     best_step: int
     final: TObject
+    """Per-step series. Reserved keys are '$'-prefixed. Each entry is measured at the 
+    start of its step, after any rewrite applied at that step, but before that step's 
+    parameter update."""
     metrics: MetricSeries
-    """Per-step series. Reserved keys are ``$``-prefixed: ``$loss`` (with
-    simplicity), ``$loss_ma``, ``$loss_cont`` (without), ``$loss_simp``, ``$lr``,
-    ``$timestamp``. Grammar extras are merged in under their own names.
-
-    Each entry is measured at the *start* of its step -- after any rewrite applied
-    at that step, but before that step's parameter update. So comparing
-    ``series[s]`` with ``series[s-1]`` across a rewrite step measures the rewrite
-    *and* one gradient step together, not the rewrite alone."""
     stopped_early: bool
     n_steps_run: int
     n_rewrites: int
@@ -193,22 +165,18 @@ def optimize(
     """
     cbs = CallbackList(callbacks)
     if args.seed is not None:
+        # TODO: do we need other seeds here?
         torch.manual_seed(args.seed)
 
     def build_optimizer(
         parameters: list[torch.Tensor], cur_step: int, lr: float
     ) -> tuple[Optimizer, LRScheduler | None]:
-        """Fresh optimizer + scheduler. Rebuilt whenever the parameter set changes.
-
-        A rewrite replaces the parameter tensors outright, so optimizer state
-        (Adam moments, scheduler counters) cannot carry over -- which is why the
-        LR is threaded through by hand as a plain scalar.
-        """
+        """Fresh optimizer + scheduler for when structures get rewritten."""
         if args.optimizer == "Adam":
             opt: Optimizer = torch.optim.Adam(parameters, lr=lr)
         elif args.optimizer == "SGD":
             opt = torch.optim.SGD(parameters, lr=lr)
-        else:
+        else:  # TODO: other optimizers?
             raise ValueError(f"unknown optimizer {args.optimizer}")
 
         sched: LRScheduler | None = None
@@ -235,13 +203,13 @@ def optimize(
             return None
         return args.clip_grad if args.clip_grad_mode == "abs" else args.clip_grad / max(lr, 1e-12)
 
-    # -- setup -------------------------------------------------------------
+    # Setup
     initial_obj = grammar.initial()
     population: TCollection = grammar.collate([initial_obj]).requires_grad_()
     state: TState = grammar.init_state()
 
     opt, sched = build_optimizer(population.parameters(), cur_step=0, lr=args.lr)
-    cur_lr = sched.get_last_lr()[0] if sched is not None else args.lr
+    cur_lr = float(sched.get_last_lr()[0]) if sched is not None else args.lr
 
     ma_loss = MovingAverage(window_size=8)
     loss_since_last_rewrite = float("inf")
@@ -265,6 +233,7 @@ def optimize(
     error: BaseException | None = None
 
     cbs.on_run_start(RunStart(grammar=grammar, args=args, initial=initial_obj))
+    # TODO: is the double try here a good pattern?
     try:
         try:
             for step in range(args.n_steps):
@@ -377,7 +346,7 @@ def optimize(
                         sched.step(loss.detach())
                     else:
                         sched.step()
-                    cur_lr = sched.get_last_lr()[0]
+                    cur_lr = float(sched.get_last_lr()[0])
 
                 state = grammar.step_state(state)
 

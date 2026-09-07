@@ -1,38 +1,30 @@
 # d4d — Design for Descent
 
-Grammar-guided hybrid optimization: gradient descent on an object's parameters,
-interleaved with discrete rewrites drawn from a grammar you define.
+Optimizing structures described through a *shape grammar*.
 
-Reference implementation of the algorithm from Kodnongbua et al., *"Design for
-Descent: What Makes a Shape Grammar Easy to Optimize?"*, SIGGRAPH Asia 2025,
-extracted from `d4descent` so it can be reused with arbitrary grammars.
+Reference implementation of Stochastic Rewrite Descent (SRD) from Kodnongbua et al., *"Design for
+Descent: What Makes a Shape Grammar Easy to Optimize?"*, SIGGRAPH Asia 2025. Built as an interface
+for custom grammars.
 
 ## The idea
 
 Many design problems are jointly discrete and continuous: how many parts, and
-where. Gradient descent handles *where*; it cannot change *how many*. Search
-handles *how many*, but combinatorially.
-
-The algorithm interleaves them. Descend on parameters, and every `propose_every`
-steps let the grammar offer rewrites that change the structure. Each candidate is
-scored by actually optimizing it briefly, and all non-conflicting improvements
+where. The algorithm interleaves continuous and discrete updates. Descend on parameters, 
+and every `propose_every` steps let the grammar offer rewrites that change the structure. 
+Each candidate is scored by actually optimizing it briefly, and all non-conflicting improvements
 are accepted at once.
-
-What makes this work is a property of the *grammar*, not the optimizer: a rule
-should fire only when it is **loss-preserving at that moment** — when splitting a
-part in two, or adding one of zero size, leaves the represented object unchanged.
-The discrete jump then costs nothing, and descent simply continues in a larger
-space. A grammar whose rewrites spike the loss will be rejected by the very
-search meant to accept them.
 
 ## Install
 
 ```bash
-pip install -e .            # torch + typing_extensions only
-pip install -e '.[progress,video]'   # tqdm, imageio for the built-in callbacks
+uv sync                                   # torch + typing_extensions only
+uv sync --extra progress --extra video    # tqdm, imageio for the built-in callbacks
 ```
 
-Python 3.11+. The core has no numpy, matplotlib or config-library dependency.
+Python 3.11+
+
+pip works as well:
+`pip install -e .` / `pip install -e '.[progress,video]'`.
 
 ## Usage
 
@@ -51,7 +43,7 @@ result = optimize(MyGrammar(), OptimizeArgs(n_steps=2000))
 ```
 
 `tests/toy.py` is a complete worked example in ~140 lines: fitting a
-piecewise-constant function whose segment count the grammar decides.
+piecewise-constant function with segments.
 
 ### The five stages
 
@@ -83,38 +75,11 @@ optimize(grammar, args, [
 `on_run_end` fires from a `finally`, so a run killed by OOM or preemption still
 produces whatever its writers had accumulated.
 
-## Differences from `d4descent`
-
-The algorithm is unchanged. The interface is not:
-
-- **`Grammar` replaces `Task`.** One class, five stages. `TCollection`,
-  `TRewrite` and `TState` have defaults, so `Grammar[MyObject]` is a valid
-  spelling.
-- **No `Renderable` on the collection.** 2-D SDF rasterization was welded into
-  the algorithm's core abstraction; rendering is a grammar concern.
-- **No classmethod constructors.** `collate` is a bound method that closes over
-  the grammar's configuration, which removes the need for the dynamic-subclass
-  `patch_args` trick used to smuggle per-collection arguments past a bare class.
-- **`combine` is inherited, not reimplemented.** All four upstream conflict
-  styles — pairwise index, pairwise node id, no-conflict-with-scores, and
-  stateful-against-the-partial-result — are expressible through `conflicts`,
-  `combine_admit` and `apply_all`.
-- **Losses are values, not base classes.** Loss-as-mixin produced MRO diamonds
-  and let a *loss* override object initialization. There is no `Objective` type:
-  a grammar with one loss implements `loss()`; one with several takes a callable.
-- **`accept_top_k: int` replaces `proposal_accept_parallel: bool`,** whose
-  disagreement with the integer `combine_proposals` actually took made three
-  upstream grammars raise `TypeError` at their first rewrite.
-- **`OptimizeResult.best` is the argmin,** not the last step's value.
-- **History is opt-in.** Upstream deep-copied the population to CPU every step
-  whether or not anyone wanted it.
-- **`cost_budget` replaces `batch_param_count`,** with a `Grammar.object_cost`
-  hook, because peak memory is not always proportional to parameter count.
-
 ## Development
 
 ```bash
-pytest                                    # 56 tests
-ruff check src/d4d tests
-pyright --pythonpath $(which python) src/d4d
+uv sync --all-extras                              # dev tools + the optional callback deps
+uv run pytest                                     # 56 tests
+uv run ruff check src/d4d tests
+uv run pyright --pythonpath .venv/bin/python src/d4d
 ```

@@ -1,8 +1,4 @@
-"""Adaptive LR scheduler.
-
-Ported verbatim from ``d4descent/scheduler.py``. Pure torch, no object
-dependencies.
-"""
+"""Adaptive LR scheduler."""
 
 from __future__ import annotations
 

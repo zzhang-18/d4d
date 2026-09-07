@@ -1,6 +1,5 @@
-"""The user-facing interface: one class per grammar.
-
-A ``Grammar`` says five things, matching the five stages of the algorithm:
+"""
+Shape grammar interface: 
 
 1. **construct** -- ``initial()`` returns the starting object; ``collate()`` packs
    objects into a differentiable batch.
@@ -10,18 +9,6 @@ A ``Grammar`` says five things, matching the five stages of the algorithm:
 4. **loss** -- ``loss()`` scores a batch, differentiably; ``simplicity()`` prices
    program length for the discrete step only.
 5. **visualize** -- ``visualize()`` returns a frame, which callbacks then persist.
-
-Everything else -- when to rewrite, how to batch, LR scheduling, early stopping,
-history, side effects -- belongs to :func:`d4d.optimize`.
-
-**No ``Objective`` or ``Renderer`` type is exported.** The core's entire
-evaluation contract is ``loss()`` and ``visualize()``; it never calls an
-objective or a renderer, so neither belongs here. Making them
-``Generic[TCollection, TState]`` would force every construction site to restate
-parameters the grammar already implies. Swapping the loss is control flow inside
-a grammar, not a type relationship: hold it as a *value* (a constructor
-argument), never as a base class. Loss-as-mixin is what produced the upstream
-MRO diamonds, and what let a *loss* override object initialization.
 """
 
 from __future__ import annotations

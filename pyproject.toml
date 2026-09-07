@@ -13,7 +13,7 @@ dependencies = [
 [project.optional-dependencies]
 progress = ["tqdm>=4.65"]
 video = ["imageio>=2.31", "imageio-ffmpeg>=0.4"]
-dev = ["pytest>=7.4", "pyright>=1.1.350", "ruff>=0.4"]
+dev = ["pytest>=7.4", "pyright>=1.1.350", "ruff>=0.4", "numpy>=1.24"]
 
 [build-system]
 requires = ["setuptools>=77.0.3", "wheel"]
@@ -32,10 +32,6 @@ testpaths = ["tests"]
 [tool.pyright]
 include = ["src/d4d"]
 pythonVersion = "3.11"
-# "standard" rather than "strict": strict's reportUnknown* rules fire on torch's
-# own incomplete stubs (Tensor.backward, Tensor.tolist, torch.manual_seed), which
-# is noise we cannot act on. The checks below are the strict-mode rules that do
-# catch real mistakes in this codebase.
 typeCheckingMode = "standard"
 reportMissingImports = "error"
 reportMissingTypeStubs = "none"
@@ -52,5 +48,5 @@ target-version = "py311"
 
 [tool.ruff.lint]
 # __all__ is grouped by role (core / callbacks / utils) with comments, which
-# reads better than alphabetical for a module this size.
+# reads better than alphabetical for this module.
 ignore = ["RUF022"]

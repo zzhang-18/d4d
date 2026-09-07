@@ -6,3 +6,6 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .venv/
+
+# my stuff
+jz_tests/
