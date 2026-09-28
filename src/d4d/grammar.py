@@ -3,12 +3,12 @@ Shape grammar interface:
 
 1. **construct** -- ``initial()`` returns the starting object; ``collate()`` packs
    objects into a differentiable batch.
-2. **rewrite** -- ``propose()`` enumerates candidate rewrites, ``apply()`` performs one.
+2. **rewrite** -- ``propose()`` enumerates candidate rewrites, ``apply()`` performs rewrites.
 3. **combine** -- ``conflicts()`` (or the accumulator hooks) decides which
-   accepted rewrites can coexist; the greedy search itself is inherited.
-4. **loss** -- ``loss()`` scores a batch, differentiably; ``simplicity()`` prices
+   accepted rewrites can coexist.
+4. **loss** -- ``loss()`` scores a batch differentiably, ``simplicity()`` computes
    program length for the discrete step only.
-5. **visualize** -- ``visualize()`` returns a frame, which callbacks then persist.
+5. **visualize** -- ``visualize()`` returns a frame for callbacks.
 """
 
 from __future__ import annotations
@@ -41,14 +41,14 @@ TState = TypeVar("TState", default=None)
 
 
 class StepContext:
-    """Where in the run we are, and why we are being called.
+    """Context of the run at a point in time.
 
-    ``phase`` is the interesting field. ``"proposal"`` means the grammar is being
+    For the field ``phase``, ``"proposal"`` means the grammar is being
     asked to score candidate rewrites rather than take a real step, which is
     permission to evaluate more cheaply -- fewer sample points, a coarser
     resolution -- and, for a stochastic objective, an instruction to *freeze* its
-    randomness so that ``base_loss - proposal_loss`` measures the rewrite rather
-    than the noise.
+    randomness so that ``base_loss - proposal_loss`` measures the improvement
+    more accurately.
     """
 
     __slots__ = (
@@ -87,7 +87,7 @@ class StepContext:
 
     @property
     def progress(self) -> float:
-        """Fraction of the run elapsed, in ``[0, 1]``. Handy for annealing schedules."""
+        """Fraction of the run elapsed in ``[0, 1]``. Handy for annealing schedules."""
         return self.step / self.total_steps if self.total_steps > 0 else 0.0
 
     def __repr__(self) -> str:
@@ -125,13 +125,9 @@ class Grammar(ABC, Generic[TObject, TCollection, TRewrite, TState]):
     """
 
     def collate(self, objects: Sequence[TObject]) -> TCollection:
-        """Pack objects into one differentiable batch. **The** collate function.
+        """Pack objects into one differentiable batch.
 
-        This is the only way a collection is ever constructed -- there are no
-        classmethod constructors anywhere in the core. Being a bound method, it
-        closes over the grammar's own configuration, which is what removes the
-        need for the dynamic-subclass ``patch_args`` trick used upstream to smuggle
-        per-collection arguments past a bare class object.
+        This is the only function for constructing collections.
 
         The batch must be differentiable end to end: ``parameters()`` are the
         leaves the optimizer steps, and :meth:`loss` must reach them.
@@ -217,7 +213,7 @@ class Grammar(ABC, Generic[TObject, TCollection, TRewrite, TState]):
     """How much improvement a proposal must show. See :class:`~d4d.combine.AcceptRule`."""
 
     def conflicts(self, a: TRewrite, b: TRewrite) -> bool:
-        """May these two rewrites be accepted together?
+        """Whether two rewrites can be applied at the same time. Defaults to True.
 
         The default says everything conflicts, so exactly one rewrite is accepted
         per rewrite step. That is always *correct* and usually slow; a grammar
@@ -291,7 +287,7 @@ class Grammar(ABC, Generic[TObject, TCollection, TRewrite, TState]):
         """
 
     def simplicity(self, batch: TCollection, ctx: StepContext) -> Sequence[float]:
-        """Price program length, per object. **Never differentiated.**
+        """Price program length, per object. This is **not** differentiated.
 
         This is what stops the grammar growing without bound. It enters only two
         places: the ranking of proposals (scaled by ``w_simplicity``), and the
