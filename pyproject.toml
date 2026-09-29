@@ -4,16 +4,19 @@ version = "0.1.0"
 description = "Design for Descent: grammar-guided hybrid discrete/continuous optimization"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "CC-BY-NC-4.0" }
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE"]
 dependencies = [
     "torch>=2.4",
     "typing_extensions>=4.4",
+    "numpy>=1.24",
+    "tqdm>=4.65",
+    "imageio>=2.31",
+    "imageio-ffmpeg>=0.4",
 ]
 
 [project.optional-dependencies]
-progress = ["tqdm>=4.65"]
-video = ["imageio>=2.31", "imageio-ffmpeg>=0.4"]
-dev = ["pytest>=7.4", "pyright>=1.1.350", "ruff>=0.4", "numpy>=1.24"]
+dev = ["pytest>=7.4", "pyright>=1.1.350", "ruff>=0.4"]
 
 [build-system]
 requires = ["setuptools>=77.0.3", "wheel"]

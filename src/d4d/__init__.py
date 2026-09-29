@@ -13,6 +13,7 @@ Define a grammar, hand it to :func:`optimize`::
         def collate(self, objects) -> MyBatch: ...
         def propose(self, obj, budget) -> list[MyRewrite]: ...
         def apply(self, obj, rewrite) -> MyObject: ...
+        def conflicts(self, a, b) -> bool: ...
         def loss(self, batch, ctx, state): ...
 
     result = optimize(MyGrammar(), OptimizeArgs(n_steps=2000))
@@ -21,7 +22,9 @@ Reference: Kodnongbua et al., "Design for Descent: What Makes a Shape Grammar
 Easy to Optimize?", SIGGRAPH Asia 2025.
 """
 
-from ._util import MovingAverage, maybe_clamp, safe_cat, safe_stack
+from importlib.metadata import PackageNotFoundError, version
+
+from ._util import MovingAverage, maybe_clamp, safe_cat, safe_stack, seed_everything
 from .callbacks import (
     BestObjectWriter,
     Callback,
@@ -43,20 +46,21 @@ from .callbacks import (
     VisualizeEvent,
 )
 from .collection import ListCollection, ListSpec, ObjectCollection, batchify
-from .combine import DEFAULT_ACCEPT_RULE, REJECT, AcceptRule, greedy_combine
 from .grammar import ExtraMetrics, Grammar, Phase, StepContext
 from .optimize import OptimizeArgs, OptimizeResult, optimize
 from .scheduler import AdaptiveLRScheduler
 from .serialize import to_jsonable
 
-__version__ = "0.1.0"
+try:
+    __version__ = version("d4d")
+except PackageNotFoundError:  # imported from a source tree that is not installed
+    __version__ = "0.0.0+unknown"
 
 __all__ = [
     "__version__",
     # core
     "Grammar", "StepContext", "Phase", "ExtraMetrics",
     "ObjectCollection", "ListCollection", "ListSpec", "batchify",
-    "AcceptRule", "DEFAULT_ACCEPT_RULE", "REJECT", "greedy_combine",
     "OptimizeArgs", "OptimizeResult", "optimize",
     "AdaptiveLRScheduler", "to_jsonable",
     # callbacks
@@ -66,5 +70,5 @@ __all__ = [
     "BestObjectWriter", "HistoryRecorder", "CheckpointWriter",
     "ConfigWriter", "DebugPrinter", "EarlyStopOnNaN",
     # utils
-    "MovingAverage", "maybe_clamp", "safe_cat", "safe_stack",
+    "MovingAverage", "maybe_clamp", "safe_cat", "safe_stack", "seed_everything",
 ]

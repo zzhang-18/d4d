@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from itertools import combinations
+
 import pytest
 import torch
 from lsystem import Expand, Turtle, TurtleGrammar, u_target
@@ -43,13 +45,13 @@ def test_expand_is_exactly_loss_preserving():
 
 
 def test_apply_all_expands_every_F_at_once():
-    """conflicts() is False, so apply_all must splice all rewrites against base indices."""
+    """Distinct Expands never conflict, so apply_all must splice them all against base indices."""
     g = TurtleGrammar(u_target())
     obj = bent()
     rewrites = g.propose(obj, budget=0)
-    assert not any(g.conflicts(a, b) for a in rewrites for b in rewrites)
+    assert not any(g.conflicts(a, b) for a, b in combinations(rewrites, 2))
 
-    joint = g.apply_all(obj, rewrites, [1.0] * len(rewrites))
+    joint = g.apply_all(obj, rewrites)
     assert joint.program == "FRF" + "R" + "FRF" + "R" + "FRF"
     assert torch.allclose(g.vertices(joint)[-1], g.vertices(obj)[-1], atol=1e-6)
     assert loss_of(g, joint) == pytest.approx(loss_of(g, obj), abs=1e-6)
@@ -57,7 +59,7 @@ def test_apply_all_expands_every_F_at_once():
 
 def test_grows_from_one_F_into_the_U():
     """A single straight F cannot draw a U; the grammar must add corners."""
-    g = TurtleGrammar(u_target(), w_symbol=1e-3)
-    res = optimize(g, OptimizeArgs(n_steps=600, lr=0.1, propose_every=50, seed=0))
+    g = TurtleGrammar(u_target())
+    res = optimize(g, OptimizeArgs(n_steps=600, lr=0.1, propose_every=50, w_simplicity=1e-3, seed=0))
     assert res.best.program.count("F") >= 3
     assert res.best_loss < 0.05 < loss_of(g, g.initial())

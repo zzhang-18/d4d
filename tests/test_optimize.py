@@ -82,13 +82,13 @@ def test_split_is_exactly_loss_preserving():
         )
 
     # and jointly, through the same apply_all path combine() uses
-    joint = g.apply_all(obj, [Split(0), Split(2)], [1.0, 1.0])
+    joint = g.apply_all(obj, [Split(0), Split(2)])
     after, _ = g.loss(g.collate([joint]), ctx, None)
     assert after.item() == pytest.approx(before.item(), abs=1e-9)
 
 
 def test_every_accepted_rewrite_improved_on_the_base():
-    """greedy_combine must never accept a candidate that scored worse than the base."""
+    """combine must never accept a candidate that scored worse than the base."""
     g = PiecewiseGrammar(step_target(64), n_initial=1, allow_remove=False)
     rec = Recorder()
     optimize(g, base_args(n_steps=100, propose_every=20), [rec])
@@ -105,7 +105,7 @@ def test_simplicity_suppresses_growth():
     target = step_target(64)
     cheap = optimize(PiecewiseGrammar(target, allow_remove=False), base_args(w_simplicity=0.0))
     dear = optimize(
-        PiecewiseGrammar(target, w_segment=1.0, allow_remove=False),
+        PiecewiseGrammar(target, allow_remove=False),
         base_args(w_simplicity=1.0),
     )
     assert dear.final.n < cheap.final.n
@@ -191,6 +191,16 @@ def test_seed_makes_runs_reproducible():
     assert a.final.edges == b.final.edges
 
 
+def test_seed_covers_sampled_proposals():
+    """A budget below the proposal count makes propose() call random.sample; seed must pin it."""
+    target = step_target(32)
+    args = base_args(n_steps=80, propose_every=10, proposal_size=2, seed=3)
+    a = optimize(PiecewiseGrammar(target, allow_remove=True), args, [])
+    b = optimize(PiecewiseGrammar(target, allow_remove=True), args, [])
+    assert a.metrics["$loss"] == pytest.approx(b.metrics["$loss"])
+    assert a.final.edges == b.final.edges
+
+
 def test_early_stopping_halts_on_stalled_rewrites():
     """With growth capped, the loss plateaus and the rewrite budget is abandoned.
 
@@ -265,8 +275,8 @@ def test_broken_callback_warns_but_does_not_kill_the_run():
 def test_remove_rewrites_are_reachable():
     """Both rule families must actually fire, not just Split."""
     target = torch.full((32,), 0.5)
-    g = PiecewiseGrammar(target, n_initial=6, allow_remove=True, w_segment=0.05)
+    g = PiecewiseGrammar(target, n_initial=6, allow_remove=True)
     rec = Recorder()
-    optimize(g, base_args(n_steps=120, propose_every=15, w_simplicity=1.0), [rec])
+    optimize(g, base_args(n_steps=120, propose_every=15, w_simplicity=0.05), [rec])
     kinds = {type(r).__name__ for ev in rec.rewrites for r in ev.accepted}
     assert "Remove" in kinds, f"only saw {kinds}"

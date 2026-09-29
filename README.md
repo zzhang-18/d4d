@@ -1,5 +1,10 @@
 # d4d — Design for Descent
 
+[[Paper]](https://www.computationaldesign.group/assets/papers/SIGA-2025-D4Descent.pdf)
+[[DOI]](https://doi.org/10.1145/3757377.3764004)
+[[Project Page]](https://www.computationaldesign.group/publications/design-for-descent)
+[[Original Code]](https://github.com/milmillin/d4descent)
+
 Optimize structures described by a *shape grammar*: gradient descent on continuous parameters,
 interleaved with discrete rewrites that change the structure itself.
 
@@ -23,11 +28,14 @@ then free, and descent does the rest.
 ## Install
 
 ```bash
-uv sync                                   # torch + typing_extensions only
-uv sync --extra progress --extra video    # tqdm, imageio for the built-in callbacks
+pip install d4d
 ```
 
-Requires Python 3.11+. pip works as well: `pip install -e .` / `pip install -e '.[progress,video]'`.
+```bash
+uv add d4d
+```
+
+Requires Python 3.11+.
 
 ## Quickstart: a grammar over strings
 
@@ -43,182 +51,196 @@ It draws exactly the same path, so it is loss-preserving. What it adds is a corn
 bend. The goal is to trace a U shape, `(0,0) → (1,0) → (1,1) → (0,1)`, starting from a single
 `F`.
 
-The full, runnable version is [`tests/lsystem.py`](tests/lsystem.py). The pieces, in order:
-
-**The object and the rewrite.** Any Python values work. The optimizer only needs to reach the
-object's tensors.
+The whole grammar, typed. [`tests/lsystem.py`](tests/lsystem.py) is the runnable version, with
+`_loss_one` filled in.
 
 ```python
+import random
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+import torch
+
+from d4d import ExtraMetrics, Grammar, ListCollection, ListSpec, OptimizeArgs, StepContext, optimize
+
+####################
+# The Object
+####################
+
 @dataclass(frozen=True)
 class Turtle:
     program: str            # e.g. "FRFRF"
-    params: torch.Tensor    # params[i] belongs to program[i]
+    params: torch.Tensor    # (len(program),); params[i] belongs to program[i]
+
+####################
+# The Rewrites
+####################
 
 @dataclass(frozen=True)
 class Expand:
-    i: int                  # apply F -> F R F at position i
-```
+    i: int                  # position of the F to expand
 
-**Construction.** `list_spec` tells the default `collate` how to take an object's tensors out
-and put new ones back. `initial` is the starting point.
 
-```python
-class TurtleGrammar(Grammar[Turtle]):
+Rewrite = Expand            # Expand | Contract | ... once there are more rules
+
+####################
+# The Grammar
+####################
+
+# Grammar[TObject, TCollection, TRewrite, TState]
+class TurtleGrammar(Grammar[Turtle, ListCollection[Turtle], Rewrite, None]):
     list_spec = ListSpec(
+        # How to extract the parameters from the object
         params_of=lambda o: [o.params],
+        # How to replace the parameters in the object.
+        # This must create a new instance of the object.
         with_params=lambda o, ts: replace(o, params=ts[0]),
     )
 
+    def __init__(self, target: torch.Tensor) -> None:
+        self.target = target  # (N, 2) points to trace
+
     def initial(self) -> Turtle:
+        """The starting object."""
         return Turtle("F", torch.tensor([1.0]))
-```
 
-**Rewriting.** `propose` lists candidate rewrites as cheap descriptions. `apply` performs one of
-them, and must not mutate its input.
+    def propose(self, obj: Turtle, budget: int) -> list[Rewrite]:
+        """Sample different rewrites for the object."""
+        specs = [Expand(i) for i, c in enumerate(obj.program) if c == "F"]
+        # Sample if too many
+        if len(specs) > budget and budget > 0:
+            specs = random.sample(specs, budget)
+        return specs
 
-```python
-    def propose(self, obj, budget):
-        out = [Expand(i) for i, c in enumerate(obj.program) if c == "F"]
-        return out[:budget] if budget > 0 else out
+    def apply(self, obj: Turtle, rewrite: Rewrite) -> Turtle:
+        if isinstance(rewrite, Expand):
+            i, v = rewrite.i, obj.params.detach()
+            half = v[i : i + 1] / 2
+            return Turtle(obj.program[:i] + "FRF" + obj.program[i + 1 :],
+                          torch.cat([v[:i], half, torch.zeros(1), half, v[i + 1 :]]))
+        # elif isinstance(rewrite, Contract):
+        #     ...
+        else:
+            raise NotImplementedError(f"Unknown rewrite {rewrite}")
 
-    def apply(self, obj, rewrite):
-        i, v = rewrite.i, obj.params.detach()
-        half = v[i : i + 1] / 2
-        return Turtle(obj.program[:i] + "FRF" + obj.program[i + 1 :],
-                      torch.cat([v[:i], half, torch.zeros(1), half, v[i + 1 :]]))
-```
-
-**Loss.** The loss is differentiable and returns one value per object in the batch. Here it
-interprets the string into a polyline and measures how well that polyline covers the target.
-Every term depends only on the drawn path, which is why `Expand` leaves the loss unchanged.
-
-```python
-    def loss(self, batch, ctx, state):
-        losses = torch.stack([self._loss_one(o) for o in batch.objects])   # (len(batch),)
-        return losses, {}          # second value: optional per-object diagnostics
-```
-
-Those four methods and `list_spec` are a complete grammar. Two optional hooks make it better:
-
-**Combining.** By default every pair of rewrites conflicts, so only one is accepted per rewrite
-step. Expansions at different positions are independent, so the grammar says so and applies
-them right to left, which keeps the base indices valid. Several corners can now be accepted at
-once.
-
-```python
-    def conflicts(self, a, b):
+    def conflicts(self, a: Rewrite, b: Rewrite) -> bool:
+        """Whether two rewrites conflict."""
+        if isinstance(a, Expand) and isinstance(b, Expand):
+            return a.i == b.i
         return False
 
-    def apply_all(self, base, rewrites, improvements):
+    def apply_all(self, base: Turtle, rewrites: Sequence[Rewrite]) -> Turtle:
+        """Optional. Apply right to left, so the base indices stay valid."""
         for r in sorted(rewrites, key=lambda r: -r.i):
             base = self.apply(base, r)
         return base
-```
 
-**Simplicity.** A non-differentiable price on program size. It only affects which rewrites are
-accepted, weighted by `OptimizeArgs.w_simplicity`, so it stops the string from growing without
-bound.
+    def loss(
+        self, batch: ListCollection[Turtle], ctx: StepContext, state: None
+    ) -> tuple[torch.Tensor, ExtraMetrics]:
+        """(B,) differentiable losses, plus per-object diagnostics (none here)."""
+        return torch.stack([self._loss_one(o) for o in batch.objects]), {}
 
-```python
-    def simplicity(self, batch, ctx):
-        return [self.w_symbol * len(o.program) for o in batch.objects]
-```
+    def _loss_one(self, obj: Turtle) -> torch.Tensor:
+        """returns: scalar, distance from the drawn polyline to target."""
+        ...
 
-**Run it:**
+    def simplicity(self, batch: ListCollection[Turtle], ctx: StepContext) -> list[float]:
+        """Optional. Usually the program size, weighted by OptimizeArgs.w_simplicity; never differentiated."""
+        return [len(o.program) for o in batch.objects]
 
-```python
-result = optimize(TurtleGrammar(u_target(), w_symbol=1e-3),
-                  OptimizeArgs(n_steps=600, lr=0.1, propose_every=50, seed=0))
+
+result = optimize(
+    TurtleGrammar(u_target()),
+    OptimizeArgs(n_steps=600, lr=0.1, propose_every=50, w_simplicity=1e-3, seed=0),
+)
 print(result.best)
 ```
 
-`uv run python tests/lsystem.py` prints the string at every rewrite event (abridged):
-
-```
-step    0  loss 6.4551  F(1.10)
-step   50  loss 5.9559  F(0.84) R(+6°) F(0.84)
-step  100  loss 0.0633  F(1.47) R(+137°) F(0.93) R(+6°) F(0.93)
-step  150  loss 0.0228  F(1.26) R(+116°) F(1.06) R(+67°) F(0.86)
-step  250  loss 0.0054  F(1.12) R(+100°) F(1.09) R(+90°) F(1.03)
-best     loss 0.0068  F(1.00) R(+90°) F(1.02) R(+92°) F(1.01)
-```
-
-Starting from one `F`, each accepted `Expand` adds a corner without changing the loss, and descent
-bends it into the U. Once three `F`s can draw the U exactly, further expansions stop paying for
-themselves and the string stops growing. (`best` loss includes the `simplicity` term,
-`5 symbols × 1e-3`.)
-
-## The grammar interface
-
-A `Grammar` has five stages. Only `initial`, `propose`, `apply` and `loss` are abstract.
-
-| stage | method | notes |
-|---|---|---|
-| construct | `initial`, `collate` | `collate` is the only way a batch is built; set `list_spec` to get it for free |
-| rewrite | `propose`, `apply` | `propose` receives the budget, so subsample before materializing |
-| combine | `conflicts` / `combine_admit`, `apply_all` | the greedy search itself is inherited |
-| loss | `loss`, `simplicity` | `loss` is differentiable and per-object; `simplicity` never is |
-| visualize | `visualize` | returns an `(H, W, 3)` uint8 frame; callbacks persist it |
+`list_spec`, `initial`, `propose`, `apply`, `conflicts` and `loss` are required. A `conflicts` that
+always returns True accepts one rewrite per rewrite event.
 
 Optional hooks, for when a grammar needs them:
 
-- `init_state` / `step_state` / `state_for_proposals`: per-run state such as annealing schedules
-  or resampled points. `state_for_proposals` freezes the state so every candidate is scored
-  under the same conditions.
 - `cleanup`: canonicalize the object periodically, for example by merging duplicates or dropping
   degenerate parts.
-- `incremental_apply` + `combine_admit`: admissibility checks that are not pairwise, or that
-  depend on the partially rewritten object.
+- `combine`: replace the greedy search, for admissibility checks that are not pairwise, or that
+  depend on the partially rewritten object. It receives the improving rewrites, best first.
 - `object_cost`: the memory cost of one object, used to size batches.
 - a custom `collate` returning your own `ObjectCollection`, when a packed tensor layout is faster
-  than the default list.
-- `config`: a JSON-able snapshot of hyperparameters, written by `ConfigWriter`.
-
-[`tests/toy.py`](tests/toy.py) is a second worked example. It fits a piecewise-constant function
-with two rule families (`Split` and `Remove`) and shows the trade-off between accuracy and
-program size.
+  than the default list; see [Custom ObjectCollection](docs/usage.md#custom-objectcollection).
+- `init_state` / `step_state` / `state_for_proposals`: per-run state such as annealing schedules
+  or resampled points. `state_for_proposals` freezes the state so every candidate is scored
+  under the same conditions. See [the optimization loop](docs/usage.md#the-optimization-loop) for
+  when each is called.
+- `config`: a JSON-able snapshot of hyperparameters, used by `ConfigWriter`.
 
 ## Running the optimizer
 
 `optimize(grammar, OptimizeArgs(...), callbacks)` returns an `OptimizeResult` with fields `best`,
 `best_loss`, `best_step`, `final`, `metrics` (per-step series), `n_steps_run`, `n_rewrites` and
-`stopped_early`. The arguments you are most likely to tune:
+`stopped_early`. Every argument, with its default and meaning, is documented on `OptimizeArgs` in
+[`src/d4d/optimize.py`](src/d4d/optimize.py).
 
-| argument | default | meaning |
-|---|---|---|
-| `n_steps` | 4000 | total descent steps |
-| `lr`, `optimizer` | 0.5, `"Adam"` | continuous step |
-| `propose_every` | 50 | steps between rewrite events |
-| `proposal_size` | 0 | candidates scored per event (`0` = all) |
-| `proposal_criterion`, `proposal_steps` | `"loss"`, 2 | how candidates are scored: brief optimization, or a gradient surrogate |
-| `accept_top_k` | 0 | maximum rewrites accepted per event (`0` = unlimited) |
-| `w_simplicity` | 1.0 | weight on `Grammar.simplicity` |
-| `seed` | None | makes runs reproducible |
+## Callbacks
 
-### Side effects
-
-The loop writes nothing to disk. Everything observable is a callback:
+Callbacks observe a run without changing it. The loop itself writes nothing to disk: progress bars,
+images, videos, metrics and checkpoints are all callbacks. To write your own, subclass `Callback` and
+override any of `on_run_start`, `on_step_end`, `on_visualize`, `on_rewrite` and `on_run_end`. Raising
+`StopRun` from a hook ends the run early; any other exception in a callback becomes a warning.
 
 ```python
-optimize(grammar, args, [
+history = HistoryRecorder(every=50)         # keeps every 50th step's object in memory
+
+result = optimize(grammar, args, [
     TqdmProgress(),
     ImageWriter("out/last.png"),
     VideoWriter("out/run.mp4", fps=5),      # flushes even if the run crashes
     MetricsWriter("out/metrics.json"),
     ConfigWriter("out/config.json"),
-    HistoryRecorder(every=50),              # history is opt-in and strided
+    history,
 ])
+
+for step, obj in zip(history.steps, history.objects):
+    ...
 ```
 
-`on_run_end` fires from a `finally`, so a run killed by OOM or preemption still produces whatever
-its writers had accumulated.
+For where `optimize` calls each grammar hook and callback, see
+[the optimization loop](docs/usage.md#the-optimization-loop) in `docs/usage.md`.
 
 ## Development
 
 ```bash
-uv sync --all-extras                              # dev tools + the optional callback deps
+uv sync --extra dev                               # pytest, pyright, ruff
 uv run pytest
 uv run ruff check src/d4d tests
 uv run pyright --pythonpath .venv/bin/python src/d4d
 uv run python tests/lsystem.py                    # the quickstart demo
 ```
+
+## Citation
+
+If you use d4d in your research, please cite:
+
+```bibtex
+@inproceedings{kodnongbua2025d4descent,
+  author    = {Kodnongbua, Milin and Zhang, Zihan and Sharp, Nicholas and Schulz, Adriana},
+  title     = {Design for Descent: What Makes a Shape Grammar Easy to Optimize?},
+  year      = {2025},
+  isbn      = {9798400721373},
+  publisher = {Association for Computing Machinery},
+  address   = {New York, NY, USA},
+  url       = {https://doi.org/10.1145/3757377.3764004},
+  doi       = {10.1145/3757377.3764004},
+  booktitle = {Proceedings of the SIGGRAPH Asia 2025 Conference Papers},
+  articleno = {172},
+  numpages  = {11},
+  location  = {Hong Kong, Hong Kong},
+  series    = {SA Conference Papers '25},
+  keywords  = {optimization, shape grammar, procedural modeling},
+}
+```
+
+## License
+
+d4d is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). It permits use,
+modification and distribution for noncommercial purposes only; see [`LICENSE`](LICENSE) for the terms.
