@@ -191,6 +191,16 @@ def test_seed_makes_runs_reproducible():
     assert a.final.edges == b.final.edges
 
 
+def test_seed_covers_sampled_proposals():
+    """A budget below the proposal count makes propose() call random.sample; seed must pin it."""
+    target = step_target(32)
+    args = base_args(n_steps=80, propose_every=10, proposal_size=2, seed=3)
+    a = optimize(PiecewiseGrammar(target, allow_remove=True), args, [])
+    b = optimize(PiecewiseGrammar(target, allow_remove=True), args, [])
+    assert a.metrics["$loss"] == pytest.approx(b.metrics["$loss"])
+    assert a.final.edges == b.final.edges
+
+
 def test_early_stopping_halts_on_stalled_rewrites():
     """With growth capped, the loss plateaus and the rewrite budget is abandoned.
 

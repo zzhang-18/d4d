@@ -22,7 +22,7 @@ Reference: Kodnongbua et al., "Design for Descent: What Makes a Shape Grammar
 Easy to Optimize?", SIGGRAPH Asia 2025.
 """
 
-from ._util import MovingAverage, maybe_clamp, safe_cat, safe_stack
+from ._util import MovingAverage, maybe_clamp, safe_cat, safe_stack, seed_everything
 from .callbacks import (
     BestObjectWriter,
     Callback,
@@ -65,5 +65,5 @@ __all__ = [
     "BestObjectWriter", "HistoryRecorder", "CheckpointWriter",
     "ConfigWriter", "DebugPrinter", "EarlyStopOnNaN",
     # utils
-    "MovingAverage", "maybe_clamp", "safe_cat", "safe_stack",
+    "MovingAverage", "maybe_clamp", "safe_cat", "safe_stack", "seed_everything",
 ]

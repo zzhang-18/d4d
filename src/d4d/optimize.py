@@ -22,7 +22,7 @@ from torch.optim.lr_scheduler import ExponentialLR, LinearLR, LRScheduler, Reduc
 from torch.optim.optimizer import Optimizer
 from typing_extensions import TypeVar
 
-from ._util import MovingAverage, maybe_clamp
+from ._util import MovingAverage, maybe_clamp, seed_everything
 from .callbacks import (
     Callback,
     CallbackList,
@@ -85,7 +85,7 @@ class OptimizeArgs:
     the loss. 'grad' uses 'loss - lr * <clip(g), g>' from one backward pass. 'grad_only'
     drops the loss term."""
     proposal_steps: int = 2
-    proposal_size: int = 0
+    proposal_size: int = 64
     """Candidate budget passed to 'Grammar.propose'. '0' means all."""
     proposal_clip_grad: bool = True
     """Clip the gradient at 'clip_grad' inside the 'grad' criteria."""
@@ -120,6 +120,7 @@ class OptimizeArgs:
     """Stop after this many consecutive stalled rewrite events. 'None' disables early stopping."""
 
     seed: int | None = None
+    """Passed to 'seed_everything' at the start of the run. 'None' leaves the RNGs as they are."""
 
     def __post_init__(self) -> None:
         if self.n_steps < 1:
@@ -194,8 +195,7 @@ def optimize(
     """
     cbs = CallbackList(callbacks)
     if args.seed is not None:
-        # TODO: do we need other seeds here?
-        torch.manual_seed(args.seed)
+        seed_everything(args.seed)
 
     def build_optimizer(
         parameters: list[torch.Tensor], cur_step: int, lr: float

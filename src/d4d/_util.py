@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import random
 from collections import deque
 from collections.abc import Sequence
 
 import torch
 
-__all__ = ["MovingAverage", "maybe_clamp", "safe_cat", "safe_stack"]
+__all__ = ["MovingAverage", "maybe_clamp", "safe_cat", "safe_stack", "seed_everything"]
 
 
 class MovingAverage:
@@ -63,3 +64,15 @@ def safe_stack(
     if len(objs) == 0:
         return torch.empty((0, *other_dim), device=device, dtype=dtype)
     return torch.stack(list(objs), dim=0)
+
+
+def seed_everything(seed: int) -> None:
+    """Seed Python's ``random``, NumPy (if installed) and torch on every device."""
+    random.seed(seed)
+    try:
+        import numpy as np
+    except ImportError:
+        pass
+    else:
+        np.random.seed(seed)
+    torch.manual_seed(seed)

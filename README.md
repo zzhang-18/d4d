@@ -47,6 +47,7 @@ The whole grammar, typed. [`tests/lsystem.py`](tests/lsystem.py) is the runnable
 `_loss_one` filled in.
 
 ```python
+import random
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 import torch
@@ -96,8 +97,11 @@ class TurtleGrammar(Grammar[Turtle, ListCollection[Turtle], Rewrite, None]):
 
     def propose(self, obj: Turtle, budget: int) -> list[Rewrite]:
         """Sample different rewrites for the object."""
-        out = [Expand(i) for i, c in enumerate(obj.program) if c == "F"]
-        return out[:budget] if budget > 0 else out
+        specs = [Expand(i) for i, c in enumerate(obj.program) if c == "F"]
+        # Sample if too many
+        if len(specs) > budget and budget > 0:
+            specs = random.sample(specs, budget)
+        return specs
 
     def apply(self, obj: Turtle, rewrite: Rewrite) -> Turtle:
         if isinstance(rewrite, Expand):
@@ -172,7 +176,7 @@ Optional hooks, for when a grammar needs them:
 | `n_steps` | 4000 | total descent steps |
 | `lr`, `optimizer` | 0.5, `"Adam"` | continuous step |
 | `propose_every` | 50 | steps between rewrite events |
-| `proposal_size` | 0 | candidates scored per event (`0` = all) |
+| `proposal_size` | 64 | candidates scored per event (`0` = all) |
 | `proposal_criterion`, `proposal_steps` | `"loss"`, 2 | how candidates are scored: brief optimization, or a gradient surrogate |
 | `accept_top_k` | 0 | maximum rewrites accepted per event (`0` = unlimited) |
 | `accept_abs_eps`, `accept_rel_eps`, `accept_eps_op` | None, None, `"or"` | improvement floors a proposal must clear; `None` disables one, both `None` means `> 0` |

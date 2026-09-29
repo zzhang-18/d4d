@@ -11,6 +11,7 @@ Run it: ``uv run python tests/lsystem.py``.
 from __future__ import annotations
 
 import math
+import random
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any
@@ -84,8 +85,11 @@ class TurtleGrammar(Grammar[Turtle, ListCollection[Turtle], Rewrite, None]):
         """Sample different rewrites for the object."""
         if len(obj.program) + 2 > self.max_symbols:
             return []
-        out = [Expand(i) for i, c in enumerate(obj.program) if c == "F"]
-        return out[:budget] if budget > 0 else out
+        specs = [Expand(i) for i, c in enumerate(obj.program) if c == "F"]
+        # Sample if too many
+        if len(specs) > budget and budget > 0:
+            specs = random.sample(specs, budget)
+        return specs
 
     def apply(self, obj: Turtle, rewrite: Rewrite) -> Turtle:
         if isinstance(rewrite, Expand):

@@ -6,6 +6,7 @@ function is unchanged. ``Remove`` merges a segment into its right neighbour.
 
 from __future__ import annotations
 
+import random
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any
@@ -72,14 +73,15 @@ class PiecewiseGrammar(Grammar[Piecewise, ListCollection[Piecewise], Any, None])
 
     # -- rewriting ---------------------------------------------------------
     def propose(self, obj: Piecewise, budget: int) -> list[Any]:
-        out: list[Any] = []
+        specs: list[Any] = []
         if obj.n < self.max_segments:
-            out.extend(Split(i) for i in range(obj.n))
+            specs.extend(Split(i) for i in range(obj.n))
         if self.allow_remove and obj.n > 1:
-            out.extend(Remove(i) for i in range(obj.n - 1))
-        if budget > 0 and len(out) > budget:
-            out = out[:budget]
-        return out
+            specs.extend(Remove(i) for i in range(obj.n - 1))
+        # Sample if too many
+        if len(specs) > budget and budget > 0:
+            specs = random.sample(specs, budget)
+        return specs
 
     def apply(self, obj: Piecewise, rewrite: Any) -> Piecewise:
         if isinstance(rewrite, Split):
