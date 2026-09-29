@@ -4,8 +4,8 @@ Shape grammar interface:
 1. **construct** -- ``initial()`` returns the starting object; ``collate()`` packs
    objects into a differentiable batch.
 2. **rewrite** -- ``propose()`` enumerates candidate rewrites, ``apply()`` performs rewrites.
-3. **combine** -- ``conflicts()`` (or the accumulator hooks) decides which
-   accepted rewrites can coexist.
+3. **combine** -- ``conflicts()`` decides which improving rewrites can coexist,
+   ``apply_all()`` applies them together; override ``combine()`` for anything else.
 4. **loss** -- ``loss()`` scores a batch differentiably, ``simplicity()`` computes
    program length for the discrete step only.
 5. **visualize** -- ``visualize()`` returns a frame for callbacks.
@@ -22,7 +22,6 @@ import torch
 from typing_extensions import TypeVar
 
 from .collection import ListCollection, ListSpec, ObjectCollection
-from .combine import DEFAULT_ACCEPT_RULE, REJECT, AcceptRule, greedy_combine
 
 if TYPE_CHECKING:  # keeps numpy out of the runtime dependency set
     import numpy as np
@@ -179,8 +178,8 @@ class Grammar(ABC, Generic[TObject, TCollection, TRewrite, TState]):
     ) -> TObject:
         """Apply an accepted *set* of rewrites to ``base``.
 
-        Called once, after the greedy search, when :attr:`incremental_apply` is
-        False. The default folds :meth:`apply` left to right.
+        Called once by the default :meth:`combine`, with the accepted set. The
+        default folds :meth:`apply` left to right.
 
         Override when rewrites must be resolved jointly -- when indices in one
         rewrite refer to positions the previous one shifted, or when the grammar
@@ -193,25 +192,6 @@ class Grammar(ABC, Generic[TObject, TCollection, TRewrite, TState]):
             out = self.apply(out, rewrite)
         return out
 
-    incremental_apply: bool = False
-    """Whether admissibility depends on the partially-rewritten object.
-
-    False (default): candidates are judged against ``base``, and the accepted set
-    is materialized once via :meth:`apply_all`. This is right when rewrites are
-    described in terms of the original's indices.
-
-    True: the optimizer folds :meth:`apply` as it goes and hands the running
-    result to :meth:`combine_admit`. Needed when accepting one rewrite can
-    invalidate another -- for instance when rewrites must preserve a shared
-    boundary that an earlier acceptance may already have changed.
-
-    A plain class attribute rather than a ``ClassVar`` so an instance can set it
-    from configuration, which also keeps tests from having to mutate the class.
-    """
-
-    accept_rule: AcceptRule = DEFAULT_ACCEPT_RULE
-    """How much improvement a proposal must show. See :class:`~d4d.combine.AcceptRule`."""
-
     def conflicts(self, a: TRewrite, b: TRewrite) -> bool:
         """Whether two rewrites can be applied at the same time. Defaults to True.
 
@@ -222,51 +202,37 @@ class Grammar(ABC, Generic[TObject, TCollection, TRewrite, TState]):
         """
         return True
 
-    def combine_init(self, base: TObject) -> Any:
-        """Seed the accumulator threaded through :meth:`combine_admit`."""
-        return None
-
-    def combine_admit(
-        self,
-        base: TObject,
-        partial: TObject,
-        acc: Any,
-        rewrite: TRewrite,
-        accepted: Sequence[TRewrite],
-    ) -> Any:
-        """Admit or veto ``rewrite``, given what has been accepted so far.
-
-        Return the updated accumulator to admit, or
-        :data:`~d4d.combine.REJECT` to veto.
-
-        The default runs the pairwise :meth:`conflicts` test against everything
-        already accepted. Override for constraints that are not pairwise -- an
-        accumulated mask, a running budget, a validity check against ``partial``
-        (which is only meaningful when :attr:`incremental_apply` is True).
-        """
-        for other in accepted:
-            if self.conflicts(other, rewrite):
-                return REJECT
-        return acc
-
     def combine(
         self,
         base: TObject,
-        rewrites: Sequence[TRewrite],
-        base_loss: float,
-        losses: Sequence[float],
-        select_top_k: int = 0,
+        ranked: Sequence[TRewrite],
+        improvements: Sequence[float],
+        top_k: int = 0,
     ) -> tuple[TObject, list[TRewrite]]:
-        """Choose and apply a set of rewrites. Rarely worth overriding.
+        """Pick a compatible subset of ``ranked`` and apply it to ``base``.
 
-        The default -- sort by improvement, greedily accept the admissible --
-        covers every grammar in the upstream tree via :meth:`conflicts`,
-        :meth:`combine_admit` and :meth:`apply_all`.
+        The optimizer has already filtered and sorted: ``ranked`` is never empty,
+        holds only proposals that cleared the acceptance floors, best first, and
+        ``improvements`` is aligned with it. Return the new object and the rewrites
+        actually applied, at most ``top_k`` of them (``0`` = unlimited).
+
+        The default greedily keeps each rewrite that :meth:`conflicts` with none
+        already kept, then applies the set once with :meth:`apply_all`. Upstream,
+        arclines and tree need only that; ur returns False from ``conflicts`` and
+        resolves clashes inside ``apply_all`` using ``improvements``. Override this
+        when admissibility is not pairwise -- dice checks each rewrite against the
+        *partially rewritten* object, so it applies as it goes.
         """
-        return greedy_combine(
-            self, base, rewrites, base_loss, losses,
-            select_top_k=select_top_k, rule=self.accept_rule,
-        )
+        accepted: list[TRewrite] = []
+        kept: list[float] = []
+        for rewrite, imp in zip(ranked, improvements):
+            if any(self.conflicts(other, rewrite) for other in accepted):
+                continue
+            accepted.append(rewrite)
+            kept.append(imp)
+            if top_k > 0 and len(accepted) >= top_k:
+                break
+        return self.apply_all(base, accepted, kept), accepted
 
     # ---- evaluation ------------------------------------------------------
 

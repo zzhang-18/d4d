@@ -18,7 +18,7 @@ from typing import Any
 
 import torch
 
-from d4d import AcceptRule, ExtraMetrics, Grammar, ListCollection, ListSpec, StepContext
+from d4d import ExtraMetrics, Grammar, ListCollection, ListSpec, StepContext
 
 
 @dataclass(frozen=True)
@@ -55,8 +55,6 @@ class PiecewiseGrammar(Grammar[Piecewise, ListCollection[Piecewise], Any, None])
         with_params=lambda o, ts: replace(o, values=ts[0]),
         names=("values",),
     )
-    incremental_apply = False
-    accept_rule = AcceptRule(abs_eps=1e-9)
 
     def __init__(
         self,

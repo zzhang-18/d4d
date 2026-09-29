@@ -89,6 +89,14 @@ class OptimizeArgs:
     proposal_clip_grad: bool = True
     """Maximum rewrites accepted per rewrite step, '0' means unlimited."""
     accept_top_k: int = 0
+    """Improvement floors a proposal must clear to be accepted: 'base_loss - loss'
+    must exceed 'accept_abs_eps' and/or 'accept_rel_eps * |base_loss|', joined by
+    'accept_eps_op'. 'None' disables a floor; with both disabled the test is plain
+    'improvement > 0'. With a noisy objective, set 'accept_abs_eps' above the noise:
+    the best of P proposals is biased low by O(sigma * sqrt(2 ln P))."""
+    accept_abs_eps: float | None = None
+    accept_rel_eps: float | None = None
+    accept_eps_op: Literal["and", "or"] = "or"
 
     # Batching
     """Budget per batch in units of 'Grammar.object_cost'. Ignored when
@@ -119,6 +127,8 @@ class OptimizeArgs:
             raise ValueError(f"cleanup_every must be >= 1, got {self.cleanup_every}")
         if self.accept_top_k < 0:
             raise ValueError(f"accept_top_k must be >= 0, got {self.accept_top_k}")
+        if self.accept_eps_op not in ("and", "or"):
+            raise ValueError(f"accept_eps_op must be 'and' or 'or', got {self.accept_eps_op!r}")
         if self.proposal_steps < 0:
             raise ValueError(f"proposal_steps must be >= 0, got {self.proposal_steps}")
 
@@ -136,6 +146,29 @@ class OptimizeResult(Generic[TObject]):
     stopped_early: bool
     n_steps_run: int
     n_rewrites: int
+
+
+def _rank_improving(args: OptimizeArgs, base_loss: float, losses: Sequence[float]) -> list[int]:
+    """Indices of the proposals that clear the acceptance floors, best first.
+
+    Sorting ascending by loss is sorting descending by improvement, and the stable
+    sort breaks ties by ascending index -- matching upstream's
+    ``candidates.append((-imp, i)); candidates.sort()``.
+    """
+
+    def improves(loss: float) -> bool:
+        imp = base_loss - loss
+        tests: list[bool] = []
+        if args.accept_abs_eps is not None:
+            tests.append(imp > args.accept_abs_eps)
+        if args.accept_rel_eps is not None:
+            # |base_loss|: a negative base must not turn the floor into accepting regressions.
+            tests.append(imp > args.accept_rel_eps * abs(base_loss))
+        if not tests:
+            return imp > 0
+        return any(tests) if args.accept_eps_op == "or" else all(tests)
+
+    return sorted((i for i, loss in enumerate(losses) if improves(loss)), key=lambda i: losses[i])
 
 
 def _merge_extra(acc: dict[str, list[float]], new: ExtraMetrics, n: int) -> None:
@@ -474,9 +507,13 @@ def _run_rewrite(
         ]
 
     cand_losses, base_loss = scored[:-1], scored[-1]
-    new_obj, accepted = grammar.combine(
-        base_obj, rewrites, base_loss, cand_losses, select_top_k=args.accept_top_k
-    )
+    ranked = _rank_improving(args, base_loss, cand_losses)
+    new_obj, accepted = base_obj, []
+    if ranked:
+        new_obj, accepted = grammar.combine(
+            base_obj, [rewrites[i] for i in ranked], [base_loss - cand_losses[i] for i in ranked],
+            top_k=args.accept_top_k,
+        )
     cbs.on_rewrite(
         RewriteEvent(
             step=step, rewrite_index=rewrite_index, base_loss=base_loss,

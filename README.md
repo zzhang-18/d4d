@@ -156,7 +156,7 @@ A `Grammar` has five stages. Only `initial`, `propose`, `apply` and `loss` are a
 |---|---|---|
 | construct | `initial`, `collate` | `collate` is the only way a batch is built; set `list_spec` to get it for free |
 | rewrite | `propose`, `apply` | `propose` receives the budget, so subsample before materializing |
-| combine | `conflicts` / `combine_admit`, `apply_all` | the greedy search itself is inherited |
+| combine | `conflicts`, `apply_all` | the greedy search itself is inherited |
 | loss | `loss`, `simplicity` | `loss` is differentiable and per-object; `simplicity` never is |
 | visualize | `visualize` | returns an `(H, W, 3)` uint8 frame; callbacks persist it |
 
@@ -167,8 +167,8 @@ Optional hooks, for when a grammar needs them:
   under the same conditions.
 - `cleanup`: canonicalize the object periodically, for example by merging duplicates or dropping
   degenerate parts.
-- `incremental_apply` + `combine_admit`: admissibility checks that are not pairwise, or that
-  depend on the partially rewritten object.
+- `combine`: replace the greedy search, for admissibility checks that are not pairwise, or that
+  depend on the partially rewritten object. It receives the improving rewrites, best first.
 - `object_cost`: the memory cost of one object, used to size batches.
 - a custom `collate` returning your own `ObjectCollection`, when a packed tensor layout is faster
   than the default list.
@@ -192,6 +192,7 @@ program size.
 | `proposal_size` | 0 | candidates scored per event (`0` = all) |
 | `proposal_criterion`, `proposal_steps` | `"loss"`, 2 | how candidates are scored: brief optimization, or a gradient surrogate |
 | `accept_top_k` | 0 | maximum rewrites accepted per event (`0` = unlimited) |
+| `accept_abs_eps`, `accept_rel_eps`, `accept_eps_op` | None, None, `"or"` | improvement floors a proposal must clear; `None` disables one, both `None` means `> 0` |
 | `w_simplicity` | 1.0 | weight on `Grammar.simplicity` |
 | `seed` | None | makes runs reproducible |
 

@@ -43,7 +43,6 @@ from .callbacks import (
     VisualizeEvent,
 )
 from .collection import ListCollection, ListSpec, ObjectCollection, batchify
-from .combine import DEFAULT_ACCEPT_RULE, REJECT, AcceptRule, greedy_combine
 from .grammar import ExtraMetrics, Grammar, Phase, StepContext
 from .optimize import OptimizeArgs, OptimizeResult, optimize
 from .scheduler import AdaptiveLRScheduler
@@ -56,7 +55,6 @@ __all__ = [
     # core
     "Grammar", "StepContext", "Phase", "ExtraMetrics",
     "ObjectCollection", "ListCollection", "ListSpec", "batchify",
-    "AcceptRule", "DEFAULT_ACCEPT_RULE", "REJECT", "greedy_combine",
     "OptimizeArgs", "OptimizeResult", "optimize",
     "AdaptiveLRScheduler", "to_jsonable",
     # callbacks

@@ -88,7 +88,7 @@ def test_split_is_exactly_loss_preserving():
 
 
 def test_every_accepted_rewrite_improved_on_the_base():
-    """greedy_combine must never accept a candidate that scored worse than the base."""
+    """combine must never accept a candidate that scored worse than the base."""
     g = PiecewiseGrammar(step_target(64), n_initial=1, allow_remove=False)
     rec = Recorder()
     optimize(g, base_args(n_steps=100, propose_every=20), [rec])
