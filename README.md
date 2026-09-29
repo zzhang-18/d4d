@@ -195,8 +195,47 @@ for step, obj in zip(history.steps, history.objects):
     ...
 ```
 
-`on_run_end` fires from a `finally`, so a run killed by OOM or preemption still produces whatever
-its writers had accumulated.
+Where `optimize` calls the grammar's hooks and the callbacks, simplified from
+[`src/d4d/optimize.py`](src/d4d/optimize.py):
+
+```python
+def optimize(grammar, args, callbacks):
+    obj = grammar.initial()
+    batch = grammar.collate([obj])
+    state = grammar.init_state()
+    on_run_start(...)
+    try:
+        for step in range(args.n_steps):
+            if step % args.cleanup_every == 0:
+                batch = grammar.cleanup(batch)
+
+            if is_rewrite_step(step):                   # every propose_every steps, or on a loss plateau
+                if stalled_too_long:                    # early stopping
+                    break
+                base = batch.get(0)
+                rewrites = grammar.propose(base, args.proposal_size)
+                if rewrites:
+                    candidates = [grammar.apply(base, r) for r in rewrites] + [base]
+                    prop_state = grammar.state_for_proposals(state)
+                    # grammar.loss(phase="proposal") + w_simplicity * grammar.simplicity
+                    scores = score(candidates, prop_state)
+                    ranked = improving(rewrites, scores)          # best first
+                    new_obj, accepted = grammar.combine(base, ranked, ...)  # conflicts, apply_all
+                    on_rewrite(...)
+                    if accepted:
+                        batch = grammar.collate([new_obj])
+
+            losses, extra = grammar.loss(batch, ctx(phase="step"), state)
+            if step % args.visualize_every == 0 or is_rewrite_step(step):
+                on_visualize(grammar.visualize(batch, ctx, state))   # skipped when it returns None
+            descent_step(losses.sum())
+            state = grammar.step_state(state)
+            on_step_end(...)
+    except StopRun:
+        pass                                            # stopped early; a result is still returned
+    finally:                                            # also on errors, OOM and preemption
+        on_run_end(...)
+```
 
 ## Development
 
