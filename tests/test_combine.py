@@ -25,7 +25,7 @@ class SlotGrammar(Grammar[tuple[str, ...], Any, Touch, None]):
     """Minimal grammar: an object is a tuple of applied tags."""
 
     def __init__(self) -> None:
-        self.apply_all_calls: list[tuple[list[Touch], list[float]]] = []
+        self.apply_all_calls: list[list[Touch]] = []
 
     def initial(self) -> tuple[str, ...]:
         return ()
@@ -45,9 +45,9 @@ class SlotGrammar(Grammar[tuple[str, ...], Any, Touch, None]):
     def conflicts(self, a: Touch, b: Touch) -> bool:
         return bool(a.slots & b.slots)
 
-    def apply_all(self, base, rewrites, improvements):
-        self.apply_all_calls.append((list(rewrites), list(improvements)))
-        return super().apply_all(base, rewrites, improvements)
+    def apply_all(self, base, rewrites):
+        self.apply_all_calls.append(list(rewrites))
+        return super().apply_all(base, rewrites)
 
 
 def touch(tag: str, *slots: int) -> Touch:
@@ -81,14 +81,11 @@ class TestCombine:
         assert [r.tag for r in accepted] == ["c"]
 
     def test_apply_all_gets_the_kept_set_once(self):
-        """Improvements handed to apply_all stay aligned after conflicts drop some."""
+        """apply_all is called once, with only the kept rewrites, best first."""
         g = SlotGrammar()
         ranked = [touch("b", 1), touch("c", 0), touch("a", 0)]
         g.combine((), ranked, [3.0, 2.0, 1.0])
-        assert len(g.apply_all_calls) == 1
-        rewrites, improvements = g.apply_all_calls[0]
-        assert [r.tag for r in rewrites] == ["b", "c"]
-        assert improvements == [3.0, 2.0]
+        assert [[r.tag for r in rw] for rw in g.apply_all_calls] == [["b", "c"]]
 
 
 class TestRankImproving:

@@ -97,7 +97,7 @@ class TurtleGrammar(Grammar[Turtle, ListCollection[Turtle], Rewrite, None]):
     def conflicts(self, a: Rewrite, b: Rewrite) -> bool:
         return False
 
-    def apply_all(self, base: Turtle, rewrites: Sequence[Rewrite], improvements: Sequence[float]) -> Turtle:
+    def apply_all(self, base: Turtle, rewrites: Sequence[Rewrite]) -> Turtle:
         for r in sorted(rewrites, key=lambda r: -r.i):      # right to left keeps base indices valid
             base = self.apply(base, r)
         return base

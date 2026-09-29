@@ -144,13 +144,10 @@ class Grammar(ABC, Generic[TObject, TCollection, TRewrite, TState]):
     def apply(self, obj: TObject, rewrite: TRewrite) -> TObject:
         """Perform one rewrite. Must not mutate ``obj``."""
 
-    def apply_all(
-        self, base: TObject, rewrites: Sequence[TRewrite], improvements: Sequence[float]
-    ) -> TObject:
-        """Apply a set of rewrites to ``base``; called once by the default :meth:`combine`.
+    def apply_all(self, base: TObject, rewrites: Sequence[TRewrite]) -> TObject:
+        """Apply a set of rewrites, best first, to ``base``; called once by the default :meth:`combine`.
 
-        ``improvements`` is aligned with ``rewrites``. The default folds
-        :meth:`apply` over ``rewrites`` in order.
+        The default folds :meth:`apply` over ``rewrites`` in order.
         """
         out = base
         for rewrite in rewrites:
@@ -171,21 +168,20 @@ class Grammar(ABC, Generic[TObject, TCollection, TRewrite, TState]):
         """Pick a compatible subset of ``ranked`` and apply it to ``base``.
 
         ``ranked`` is non-empty and holds the proposals that cleared the
-        acceptance floors, best first; ``improvements`` is aligned with it.
+        acceptance floors, best first; ``improvements`` is aligned with it and
+        unused by the default.
         Returns the new object and the applied rewrites, at most ``top_k`` of them
         (``0`` = unlimited). The default keeps each rewrite that :meth:`conflicts`
         with none already kept, then calls :meth:`apply_all` once.
         """
         accepted: list[TRewrite] = []
-        kept: list[float] = []
-        for rewrite, imp in zip(ranked, improvements):
+        for rewrite in ranked:
             if any(self.conflicts(other, rewrite) for other in accepted):
                 continue
             accepted.append(rewrite)
-            kept.append(imp)
             if top_k > 0 and len(accepted) >= top_k:
                 break
-        return self.apply_all(base, accepted, kept), accepted
+        return self.apply_all(base, accepted), accepted
 
     # ---- evaluation ------------------------------------------------------
 

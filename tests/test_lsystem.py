@@ -49,7 +49,7 @@ def test_apply_all_expands_every_F_at_once():
     rewrites = g.propose(obj, budget=0)
     assert not any(g.conflicts(a, b) for a in rewrites for b in rewrites)
 
-    joint = g.apply_all(obj, rewrites, [1.0] * len(rewrites))
+    joint = g.apply_all(obj, rewrites)
     assert joint.program == "FRF" + "R" + "FRF" + "R" + "FRF"
     assert torch.allclose(g.vertices(joint)[-1], g.vertices(obj)[-1], atol=1e-6)
     assert loss_of(g, joint) == pytest.approx(loss_of(g, obj), abs=1e-6)

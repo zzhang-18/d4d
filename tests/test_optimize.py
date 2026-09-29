@@ -82,7 +82,7 @@ def test_split_is_exactly_loss_preserving():
         )
 
     # and jointly, through the same apply_all path combine() uses
-    joint = g.apply_all(obj, [Split(0), Split(2)], [1.0, 1.0])
+    joint = g.apply_all(obj, [Split(0), Split(2)])
     after, _ = g.loss(g.collate([joint]), ctx, None)
     assert after.item() == pytest.approx(before.item(), abs=1e-9)
 

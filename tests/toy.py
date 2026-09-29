@@ -104,9 +104,7 @@ class PiecewiseGrammar(Grammar[Piecewise, ListCollection[Piecewise], Any, None])
         """Rewrites on the same or neighbouring segments conflict."""
         return abs(a.i - b.i) <= 1
 
-    def apply_all(
-        self, base: Piecewise, rewrites: Sequence[Any], improvements: Sequence[float]
-    ) -> Piecewise:
+    def apply_all(self, base: Piecewise, rewrites: Sequence[Any]) -> Piecewise:
         out = base  # right to left, so base indices stay valid
         for rewrite in sorted(rewrites, key=lambda r: -r.i):
             out = self.apply(out, rewrite)
