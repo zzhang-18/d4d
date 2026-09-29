@@ -169,33 +169,30 @@ Optional hooks, for when a grammar needs them:
 
 `optimize(grammar, OptimizeArgs(...), callbacks)` returns an `OptimizeResult` with fields `best`,
 `best_loss`, `best_step`, `final`, `metrics` (per-step series), `n_steps_run`, `n_rewrites` and
-`stopped_early`. The arguments you are most likely to tune:
+`stopped_early`. Every argument, with its default and meaning, is documented on `OptimizeArgs` in
+[`src/d4d/optimize.py`](src/d4d/optimize.py).
 
-| argument | default | meaning |
-|---|---|---|
-| `n_steps` | 4000 | total descent steps |
-| `lr`, `optimizer` | 0.5, `"Adam"` | continuous step |
-| `propose_every` | 50 | steps between rewrite events |
-| `proposal_size` | 64 | candidates scored per event (`0` = all) |
-| `proposal_criterion`, `proposal_steps` | `"loss"`, 2 | how candidates are scored: brief optimization, or a gradient surrogate |
-| `accept_top_k` | 0 | maximum rewrites accepted per event (`0` = unlimited) |
-| `accept_abs_eps`, `accept_rel_eps`, `accept_eps_op` | None, None, `"or"` | improvement floors a proposal must clear; `None` disables one, both `None` means `> 0` |
-| `w_simplicity` | 1.0 | weight on `Grammar.simplicity` |
-| `seed` | None | makes runs reproducible |
+## Callbacks
 
-### Side effects
-
-The loop writes nothing to disk. Everything observable is a callback:
+Callbacks observe a run without changing it. The loop itself writes nothing to disk: progress bars,
+images, videos, metrics and checkpoints are all callbacks. To write your own, subclass `Callback` and
+override any of `on_run_start`, `on_step_end`, `on_visualize`, `on_rewrite` and `on_run_end`. Raising
+`StopRun` from a hook ends the run early; any other exception in a callback becomes a warning.
 
 ```python
-optimize(grammar, args, [
+history = HistoryRecorder(every=50)         # keeps every 50th step's object in memory
+
+result = optimize(grammar, args, [
     TqdmProgress(),
     ImageWriter("out/last.png"),
     VideoWriter("out/run.mp4", fps=5),      # flushes even if the run crashes
     MetricsWriter("out/metrics.json"),
     ConfigWriter("out/config.json"),
-    HistoryRecorder(every=50),              # history is opt-in and strided
+    history,
 ])
+
+for step, obj in zip(history.steps, history.objects):
+    ...
 ```
 
 `on_run_end` fires from a `finally`, so a run killed by OOM or preemption still produces whatever
