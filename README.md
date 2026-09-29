@@ -1,5 +1,10 @@
 # d4d — Design for Descent
 
+[[Paper]](https://www.computationaldesign.group/assets/papers/SIGA-2025-D4Descent.pdf)
+[[DOI]](https://doi.org/10.1145/3757377.3764004)
+[[Project Page]](https://www.computationaldesign.group/publications/design-for-descent)
+[[Original Code]](https://github.com/milmillin/d4descent)
+
 Optimize structures described by a *shape grammar*: gradient descent on continuous parameters,
 interleaved with discrete rewrites that change the structure itself.
 
@@ -162,10 +167,11 @@ Optional hooks, for when a grammar needs them:
   depend on the partially rewritten object. It receives the improving rewrites, best first.
 - `object_cost`: the memory cost of one object, used to size batches.
 - a custom `collate` returning your own `ObjectCollection`, when a packed tensor layout is faster
-  than the default list.
+  than the default list; see [Custom ObjectCollection](docs/usage.md#custom-objectcollection).
 - `init_state` / `step_state` / `state_for_proposals`: per-run state such as annealing schedules
   or resampled points. `state_for_proposals` freezes the state so every candidate is scored
-  under the same conditions.
+  under the same conditions. See [the optimization loop](docs/usage.md#the-optimization-loop) for
+  when each is called.
 - `config`: a JSON-able snapshot of hyperparameters, used by `ConfigWriter`.
 
 ## Running the optimizer
@@ -198,47 +204,8 @@ for step, obj in zip(history.steps, history.objects):
     ...
 ```
 
-Where `optimize` calls the grammar's hooks and the callbacks, simplified from
-[`src/d4d/optimize.py`](src/d4d/optimize.py):
-
-```python
-def optimize(grammar, args, callbacks):
-    obj = grammar.initial()
-    batch = grammar.collate([obj])
-    state = grammar.init_state()
-    on_run_start(...)
-    try:
-        for step in range(args.n_steps):
-            if step % args.cleanup_every == 0:
-                batch = grammar.cleanup(batch)
-
-            if is_rewrite_step(step):                   # every propose_every steps, or on a loss plateau
-                if stalled_too_long:                    # early stopping
-                    break
-                base = batch.get(0)
-                rewrites = grammar.propose(base, args.proposal_size)
-                if rewrites:
-                    candidates = [grammar.apply(base, r) for r in rewrites] + [base]
-                    prop_state = grammar.state_for_proposals(state)
-                    # grammar.loss(phase="proposal") + w_simplicity * grammar.simplicity
-                    scores = score(candidates, prop_state)
-                    ranked = improving(rewrites, scores)          # best first
-                    new_obj, accepted = grammar.combine(base, ranked, ...)  # conflicts, apply_all
-                    on_rewrite(...)
-                    if accepted:
-                        batch = grammar.collate([new_obj])
-
-            losses, extra = grammar.loss(batch, ctx(phase="step"), state)
-            if step % args.visualize_every == 0 or is_rewrite_step(step):
-                on_visualize(grammar.visualize(batch, ctx, state))   # skipped when it returns None
-            descent_step(losses.sum())
-            state = grammar.step_state(state)
-            on_step_end(...)
-    except StopRun:
-        pass                                            # stopped early; a result is still returned
-    finally:                                            # also on errors, OOM and preemption
-        on_run_end(...)
-```
+For where `optimize` calls each grammar hook and callback, see
+[the optimization loop](docs/usage.md#the-optimization-loop) in `docs/usage.md`.
 
 ## Development
 
@@ -249,3 +216,31 @@ uv run ruff check src/d4d tests
 uv run pyright --pythonpath .venv/bin/python src/d4d
 uv run python tests/lsystem.py                    # the quickstart demo
 ```
+
+## Citation
+
+If you use d4d in your research, please cite:
+
+```bibtex
+@inproceedings{kodnongbua2025d4descent,
+  author    = {Kodnongbua, Milin and Zhang, Zihan and Sharp, Nicholas and Schulz, Adriana},
+  title     = {Design for Descent: What Makes a Shape Grammar Easy to Optimize?},
+  year      = {2025},
+  isbn      = {9798400721373},
+  publisher = {Association for Computing Machinery},
+  address   = {New York, NY, USA},
+  url       = {https://doi.org/10.1145/3757377.3764004},
+  doi       = {10.1145/3757377.3764004},
+  booktitle = {Proceedings of the SIGGRAPH Asia 2025 Conference Papers},
+  articleno = {172},
+  numpages  = {11},
+  location  = {Hong Kong, Hong Kong},
+  series    = {SA Conference Papers '25},
+  keywords  = {optimization, shape grammar, procedural modeling},
+}
+```
+
+## License
+
+d4d is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). It permits use,
+modification and distribution for noncommercial purposes only; see [`LICENSE`](LICENSE) for the terms.
