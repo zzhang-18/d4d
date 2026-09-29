@@ -22,7 +22,7 @@ from typing_extensions import TypeVar
 
 from .collection import ListCollection, ListSpec, ObjectCollection
 
-if TYPE_CHECKING:  # numpy is not a runtime dependency
+if TYPE_CHECKING:
     import numpy as np
 
 __all__ = ["ExtraMetrics", "Grammar", "Phase", "StepContext"]

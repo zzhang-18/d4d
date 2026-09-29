@@ -158,18 +158,15 @@ SaveFn = Callable[[Any, Path], None]
 
 
 class TqdmProgress(Callback):
-    """Progress bar. Needs the ``progress`` extra; warns and does nothing without it."""
+    """Progress bar over the run's steps."""
 
     def __init__(self, **kwargs: Any) -> None:
         self._kwargs = kwargs
         self._bar: Any = None
 
     def on_run_start(self, ev: RunStart) -> None:
-        try:
-            from tqdm.auto import tqdm
-        except ImportError:
-            warnings.warn("TqdmProgress needs tqdm: pip install 'd4d[progress]'", stacklevel=2)
-            return
+        from tqdm.auto import tqdm
+
         self._bar = tqdm(total=ev.args.n_steps, **self._kwargs)
 
     def on_step_end(self, ev: StepEnd) -> None:
@@ -197,10 +194,8 @@ class ImageWriter(Callback):
 
 
 def _default_save_image(image: np.ndarray, path: Path) -> None:
-    try:
-        import imageio.v3 as iio
-    except ImportError as exc:
-        raise RuntimeError("ImageWriter needs imageio: pip install 'd4d[video]'") from exc
+    import imageio.v3 as iio
+
     iio.imwrite(path, image)
 
 
@@ -221,11 +216,8 @@ class VideoWriter(Callback):
     def on_run_end(self, ev: RunEnd) -> None:
         if not self.frames:
             return
-        try:
-            import imageio.v3 as iio
-        except ImportError:
-            warnings.warn("VideoWriter needs imageio: pip install 'd4d[video]'", stacklevel=2)
-            return
+        import imageio.v3 as iio
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         iio.imwrite(self.path, self.frames, fps=self.fps, codec="libx264")
 

@@ -6,6 +6,7 @@ import random
 from collections import deque
 from collections.abc import Sequence
 
+import numpy as np
 import torch
 
 __all__ = ["MovingAverage", "maybe_clamp", "safe_cat", "safe_stack", "seed_everything"]
@@ -67,12 +68,7 @@ def safe_stack(
 
 
 def seed_everything(seed: int) -> None:
-    """Seed Python's ``random``, NumPy (if installed) and torch on every device."""
+    """Seed Python's ``random``, NumPy and torch on every device."""
     random.seed(seed)
-    try:
-        import numpy as np
-    except ImportError:
-        pass
-    else:
-        np.random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)

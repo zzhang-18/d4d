@@ -23,11 +23,14 @@ then free, and descent does the rest.
 ## Install
 
 ```bash
-uv sync                                   # torch + typing_extensions only
-uv sync --extra progress --extra video    # tqdm, imageio for the built-in callbacks
+pip install git+https://github.com/zzhang-18/d4d.git
 ```
 
-Requires Python 3.11+. pip works as well: `pip install -e .` / `pip install -e '.[progress,video]'`.
+```bash
+uv add git+https://github.com/zzhang-18/d4d.git
+```
+
+Requires Python 3.11+.
 
 ## Quickstart: a grammar over strings
 
@@ -240,7 +243,7 @@ def optimize(grammar, args, callbacks):
 ## Development
 
 ```bash
-uv sync --all-extras                              # dev tools + the optional callback deps
+uv sync --extra dev                               # pytest, pyright, ruff
 uv run pytest
 uv run ruff check src/d4d tests
 uv run pyright --pythonpath .venv/bin/python src/d4d
