@@ -28,11 +28,11 @@ then free, and descent does the rest.
 ## Install
 
 ```bash
-pip install git+https://github.com/zzhang-18/d4d.git
+pip install d4d
 ```
 
 ```bash
-uv add git+https://github.com/zzhang-18/d4d.git
+uv add d4d
 ```
 
 Requires Python 3.11+.
