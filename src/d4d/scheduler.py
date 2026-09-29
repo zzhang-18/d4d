@@ -11,12 +11,11 @@ __all__ = ["AdaptiveLRScheduler"]
 
 
 class AdaptiveLRScheduler(LRScheduler):
-    """Like ``ReduceLROnPlateau``, but it also *raises* the LR again.
+    """``ReduceLROnPlateau`` that also raises the LR.
 
-    After ``increase_patience`` consecutive non-worsening steps the LR is
-    multiplied by ``sqrt(1/factor)`` -- half a notch, so recovery is slower than
-    decay. That asymmetry is what lets a run keep making progress after a
-    rewrite has changed the landscape underneath it.
+    After more than ``reduce_patience`` steps without improvement the LR is
+    multiplied by ``factor``; after more than ``increase_patience`` consecutive
+    non-worsening steps, by ``sqrt(1/factor)``. The LR stays in ``[min_lr, max_lr]``.
     """
 
     def __init__(

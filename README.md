@@ -43,94 +43,91 @@ It draws exactly the same path, so it is loss-preserving. What it adds is a corn
 bend. The goal is to trace a U shape, `(0,0) → (1,0) → (1,1) → (0,1)`, starting from a single
 `F`.
 
-The full, runnable version is [`tests/lsystem.py`](tests/lsystem.py). The pieces, in order:
-
-**The object and the rewrite.** Any Python values work. The optimizer only needs to reach the
-object's tensors.
+The whole grammar, typed. [`tests/lsystem.py`](tests/lsystem.py) is the runnable version, with
+`_loss_one` filled in.
 
 ```python
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+
+import torch
+
+from d4d import ExtraMetrics, Grammar, ListCollection, ListSpec, OptimizeArgs, StepContext, optimize
+
+
 @dataclass(frozen=True)
 class Turtle:
     program: str            # e.g. "FRFRF"
-    params: torch.Tensor    # params[i] belongs to program[i]
+    params: torch.Tensor    # (len(program),); params[i] belongs to program[i]
+
 
 @dataclass(frozen=True)
 class Expand:
     i: int                  # apply F -> F R F at position i
-```
 
-**Construction.** `list_spec` tells the default `collate` how to take an object's tensors out
-and put new ones back. `initial` is the starting point.
 
-```python
-class TurtleGrammar(Grammar[Turtle]):
+Rewrite = Expand            # Expand | Contract | ... once there are more rules
+
+
+# Grammar[TObject, TCollection, TRewrite, TState]
+class TurtleGrammar(Grammar[Turtle, ListCollection[Turtle], Rewrite, None]):
+    # how the default collate() takes an object's tensors out and puts new ones back
     list_spec = ListSpec(
         params_of=lambda o: [o.params],
         with_params=lambda o, ts: replace(o, params=ts[0]),
     )
 
+    def __init__(self, target: torch.Tensor) -> None:
+        self.target = target                                # (N, 2) points to trace
+
     def initial(self) -> Turtle:
         return Turtle("F", torch.tensor([1.0]))
-```
 
-**Rewriting.** `propose` lists candidate rewrites as cheap descriptions. `apply` performs one of
-them, and must not mutate its input.
-
-```python
-    def propose(self, obj, budget):
+    def propose(self, obj: Turtle, budget: int) -> list[Rewrite]:
         out = [Expand(i) for i, c in enumerate(obj.program) if c == "F"]
         return out[:budget] if budget > 0 else out
 
-    def apply(self, obj, rewrite):
+    def apply(self, obj: Turtle, rewrite: Rewrite) -> Turtle:      # must not mutate obj
         i, v = rewrite.i, obj.params.detach()
         half = v[i : i + 1] / 2
         return Turtle(obj.program[:i] + "FRF" + obj.program[i + 1 :],
                       torch.cat([v[:i], half, torch.zeros(1), half, v[i + 1 :]]))
-```
 
-**Loss.** The loss is differentiable and returns one value per object in the batch. Here it
-interprets the string into a polyline and measures how well that polyline covers the target.
-Every term depends only on the drawn path, which is why `Expand` leaves the loss unchanged.
-
-```python
-    def loss(self, batch, ctx, state):
-        losses = torch.stack([self._loss_one(o) for o in batch.objects])   # (len(batch),)
-        return losses, {}          # second value: optional per-object diagnostics
-```
-
-Those four methods and `list_spec` are a complete grammar. Two optional hooks make it better:
-
-**Combining.** By default every pair of rewrites conflicts, so only one is accepted per rewrite
-step. Expansions at different positions are independent, so the grammar says so and applies
-them right to left, which keeps the base indices valid. Several corners can now be accepted at
-once.
-
-```python
-    def conflicts(self, a, b):
+    # optional: accept several Expands per rewrite event
+    def conflicts(self, a: Rewrite, b: Rewrite) -> bool:
         return False
 
-    def apply_all(self, base, rewrites, improvements):
-        for r in sorted(rewrites, key=lambda r: -r.i):
+    def apply_all(self, base: Turtle, rewrites: Sequence[Rewrite], improvements: Sequence[float]) -> Turtle:
+        for r in sorted(rewrites, key=lambda r: -r.i):      # right to left keeps base indices valid
             base = self.apply(base, r)
         return base
-```
 
-**Simplicity.** A non-differentiable price on program size. It only affects which rewrites are
-accepted, weighted by `OptimizeArgs.w_simplicity`, so it stops the string from growing without
-bound.
+    def _loss_one(self, obj: Turtle) -> torch.Tensor:
+        """() -- distance from the drawn polyline to target."""
+        ...
 
-```python
-    def simplicity(self, batch, ctx):
-        return [self.w_symbol * len(o.program) for o in batch.objects]
-```
+    def loss(
+        self, batch: ListCollection[Turtle], ctx: StepContext, state: None
+    ) -> tuple[torch.Tensor, ExtraMetrics]:
+        losses = torch.stack([self._loss_one(o) for o in batch.objects])   # (B,)
+        return losses, {}                                   # no per-object diagnostics
 
-**Run it:**
+    def simplicity(self, batch: ListCollection[Turtle], ctx: StepContext) -> list[float]:
+        return [len(o.program) for o in batch.objects]     # not differentiated
 
-```python
-result = optimize(TurtleGrammar(u_target(), w_symbol=1e-3),
-                  OptimizeArgs(n_steps=600, lr=0.1, propose_every=50, seed=0))
+
+result = optimize(
+    TurtleGrammar(u_target()),                              # (48, 2) U-shaped target; see tests/lsystem.py
+    OptimizeArgs(n_steps=600, lr=0.1, propose_every=50, w_simplicity=1e-3, seed=0),
+)
 print(result.best)
 ```
+
+- `list_spec`, `initial`, `propose`, `apply` and `loss` are a complete grammar. `conflicts` and
+  `apply_all` are optional: by default every pair of rewrites conflicts, so one rewrite is accepted
+  per rewrite event.
+- `simplicity` prices program size. It gets no gradient; `OptimizeArgs.w_simplicity` weights it when
+  ranking proposals and in the logged `$loss`, which stops the string from growing without bound.
 
 `uv run python tests/lsystem.py` prints the string at every rewrite event (abridged):
 
@@ -156,7 +153,7 @@ A `Grammar` has five stages. Only `initial`, `propose`, `apply` and `loss` are a
 |---|---|---|
 | construct | `initial`, `collate` | `collate` is the only way a batch is built; set `list_spec` to get it for free |
 | rewrite | `propose`, `apply` | `propose` receives the budget, so subsample before materializing |
-| combine | `conflicts`, `apply_all` | the greedy search itself is inherited |
+| combine | `conflicts`, `apply_all` | default: every pair conflicts, and `apply_all` folds `apply` in rank order |
 | loss | `loss`, `simplicity` | `loss` is differentiable and per-object; `simplicity` never is |
 | visualize | `visualize` | returns an `(H, W, 3)` uint8 frame; callbacks persist it |
 

@@ -1,13 +1,13 @@
 """The optimization loop.
 
-Alternates gradient descent on differentiable parameters and discrete rewrites.
-Steps:
-1. if rewriting: check early stopping, ``propose``, score the candidates, ``combine``.
-2. periodically ``cleanup`` and rebuild the optimizer.
-3. take a continuous step.
-5. advance moving average, the LR scheduler and the grammar's state.
+Alternates gradient descent on continuous parameters with discrete rewrites.
+Each step:
 
-Scoring a candidate amounts to doing ``proposal_steps`` gradient descent steps.
+1. decide whether this is a rewrite step;
+2. every ``cleanup_every`` steps, ``cleanup`` and rebuild the optimizer;
+3. on a rewrite step, check early stopping, ``propose``, score the candidates and ``combine``;
+4. take a descent step;
+5. update the moving average, the LR scheduler and the grammar's state.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ MetricSeries = dict[str, tuple[float, ...]]
 
 @dataclass
 class OptimizeArgs:
-    """Optimization hyperparams"""
+    """Hyperparameters for :func:`optimize`."""
 
     n_steps: int = 4000
 
@@ -58,63 +58,66 @@ class OptimizeArgs:
     scheduler: Literal["none", "ReduceLROnPlateau", "AdaptiveLR", "LinearLR", "ExponentialLR"] = "none"
     lr: float = 0.5
     clip_grad: float | None = 2.0
-    """'rel' divides the clip value by the current LR, bounding the step size
-    # rather than the gradient, which keeps behavior stable as LR decays."""
+    """Clip gradient values to [-clip_grad, clip_grad]. 'None' disables."""
     clip_grad_mode: Literal["abs", "rel"] = "abs"
+    """'abs' clips at 'clip_grad'; 'rel' clips at 'clip_grad / lr'."""
     reduce_lr_factor: float = 0.5
     reduce_lr_patience: int = 2
     reduce_lr_min_lr: float = 1e-4
     increase_lr_patience: int = 2
     reset_lr_after_proposal: bool = False
-    """A rewrite changes the landscape, so an LR that had decayed onto a plateau is
-    probably too small for the new one, this nudges it back up."""
+    """With ReduceLROnPlateau, reset the LR to 'lr' after an accepted rewrite."""
     increase_lr_after_proposal: bool = True
+    """With ReduceLROnPlateau, divide the LR by 'reduce_lr_factor' (capped at 'lr') after an accepted rewrite."""
 
     # Clean up
     cleanup_every: int = 10
 
     # Proposal (rewrites)
     proposal_trigger: Literal["step", "rel_loss"] = "step"
+    """'step' rewrites every 'propose_every' steps. 'rel_loss' rewrites after 'proposal_patience'
+    consecutive steps whose moving-average loss fell by less than a 'proposal_rel_loss' fraction."""
     propose_every: int = 50
     proposal_rel_loss: float = 5e-3
     proposal_patience: int = 10
-    """ Criteria for scoring candidates. 'loss' optimizes for 'proposal_steps' and
-    checks loss. 'grad' uses 'loss - lr * <g, g>' from a single backward pass.
-    'grad_only' scores on grad alone.
-    """
     proposal_criterion: Literal["loss", "grad", "grad_only"] = "loss"
+    """How candidates are scored. 'loss' takes 'proposal_steps' descent steps, then evaluates
+    the loss. 'grad' uses 'loss - lr * <clip(g), g>' from one backward pass. 'grad_only'
+    drops the loss term."""
     proposal_steps: int = 2
-    """Number of candidates to evaluate, '0' means all."""
     proposal_size: int = 0
+    """Candidate budget passed to 'Grammar.propose'. '0' means all."""
     proposal_clip_grad: bool = True
-    """Maximum rewrites accepted per rewrite step, '0' means unlimited."""
+    """Clip the gradient at 'clip_grad' inside the 'grad' criteria."""
     accept_top_k: int = 0
-    """Improvement floors a proposal must clear to be accepted: 'base_loss - loss'
-    must exceed 'accept_abs_eps' and/or 'accept_rel_eps * |base_loss|', joined by
-    'accept_eps_op'. 'None' disables a floor; with both disabled the test is plain
-    'improvement > 0'. With a noisy objective, set 'accept_abs_eps' above the noise:
-    the best of P proposals is biased low by O(sigma * sqrt(2 ln P))."""
+    """Maximum rewrites accepted per rewrite step. '0' means unlimited."""
     accept_abs_eps: float | None = None
+    """Floor: accept only if 'base_loss - loss > accept_abs_eps'. 'None' disables."""
     accept_rel_eps: float | None = None
+    """Floor: accept only if 'base_loss - loss > accept_rel_eps * |base_loss|'. 'None' disables."""
     accept_eps_op: Literal["and", "or"] = "or"
+    """Whether both floors or either must be cleared. With both disabled, the test is 'base_loss - loss > 0'."""
 
     # Batching
-    """Budget per batch in units of 'Grammar.object_cost'. Ignored when
-    'batch_size' is set."""
     cost_budget: int = 8192
+    """Budget per batch, in units of 'Grammar.object_cost'. Ignored when 'batch_size' is set."""
     batch_size: int | None = None
+    """Candidates per batch."""
 
     # Simplicity
     w_simplicity: float = 1.0
+    """Weight on 'Grammar.simplicity' in proposal ranking and '$loss'."""
 
     # Visualization
     visualize_every: int = 10
+    """Call 'Grammar.visualize' every this many steps and on rewrite steps. '0' disables."""
 
     # Early stopping
     stopping_eps: float = 5e-3
-    """Stop after this many consecutive rewrites without improvement. 'None'
-    disables early stopping."""
+    """A rewrite event stalls unless the moving-average loss is at most '(1 - stopping_eps)' times
+    its lowest value at earlier rewrite events."""
     stopping_patience: int | None = None
+    """Stop after this many consecutive stalled rewrite events. 'None' disables early stopping."""
 
     seed: int | None = None
 
@@ -139,22 +142,16 @@ class OptimizeResult(Generic[TObject]):
     best_loss: float
     best_step: int
     final: TObject
-    """Per-step series. Reserved keys are '$'-prefixed. Each entry is measured at the 
-    start of its step, after any rewrite applied at that step, but before that step's 
-    parameter update."""
     metrics: MetricSeries
+    """Per-step series; reserved keys are '$'-prefixed. Each entry is measured after that
+    step's rewrite, if any, and before its parameter update."""
     stopped_early: bool
     n_steps_run: int
     n_rewrites: int
 
 
 def _rank_improving(args: OptimizeArgs, base_loss: float, losses: Sequence[float]) -> list[int]:
-    """Indices of the proposals that clear the acceptance floors, best first.
-
-    Sorting ascending by loss is sorting descending by improvement, and the stable
-    sort breaks ties by ascending index -- matching upstream's
-    ``candidates.append((-imp, i)); candidates.sort()``.
-    """
+    """Indices of the proposals that clear the acceptance floors, by ascending loss; ties keep index order."""
 
     def improves(loss: float) -> bool:
         imp = base_loss - loss
@@ -162,7 +159,6 @@ def _rank_improving(args: OptimizeArgs, base_loss: float, losses: Sequence[float
         if args.accept_abs_eps is not None:
             tests.append(imp > args.accept_abs_eps)
         if args.accept_rel_eps is not None:
-            # |base_loss|: a negative base must not turn the floor into accepting regressions.
             tests.append(imp > args.accept_rel_eps * abs(base_loss))
         if not tests:
             return imp > 0
@@ -204,7 +200,7 @@ def optimize(
     def build_optimizer(
         parameters: list[torch.Tensor], cur_step: int, lr: float
     ) -> tuple[Optimizer, LRScheduler | None]:
-        """Fresh optimizer + scheduler for when structures get rewritten."""
+        """A fresh optimizer and scheduler over ``parameters`` (leaf tensors, any shape)."""
         if args.optimizer == "Adam":
             opt: Optimizer = torch.optim.Adam(parameters, lr=lr)
         elif args.optimizer == "SGD":
@@ -286,14 +282,12 @@ def optimize(
                 if step % args.cleanup_every == 0:
                     population = grammar.cleanup(population).requires_grad_()
                     if not rewrite:
-                        # On a rewrite step the optimizer is rebuilt below anyway.
+                        # rewrite steps rebuild it in step 3
                         opt, sched = build_optimizer(population.parameters(), step, cur_lr)
 
                 # -- 3. rewrite --------------------------------------------
                 if rewrite:
-                    # Improvement is measured between rewrites, not between
-                    # steps: a rewrite earns its keep only if the descent it
-                    # unlocked went somewhere the previous shape could not.
+                    # stall check: moving-average loss vs. its lowest value at earlier rewrite events
                     cur_ma = series["$loss_ma"][-1]
                     if cur_ma > loss_since_last_rewrite * (1 - args.stopping_eps):
                         stopping_patience += 1
@@ -374,8 +368,7 @@ def optimize(
 
                 if sched is not None:
                     if isinstance(sched, (ReduceLROnPlateau, AdaptiveLRScheduler)):
-                        # detached: these take a metric, and passing a grad-tracking
-                        # tensor makes torch warn about the implicit scalar conversion
+                        # plateau schedulers take the detached loss
                         sched.step(loss.detach())
                     else:
                         sched.step()
@@ -394,13 +387,12 @@ def optimize(
                         loss_simplicity=series["$loss_simp"][-1], loss_ma=ma[-1],
                         lr=cur_lr, rewrite=rewrite, elapsed=series["$timestamp"][-1],
                         extra={k: v[-1] for k, v in extra_acc.items()},
-                        # Lazy: a run that records no history pays nothing here.
+                        # evaluated only if a callback calls get_object()
                         _get_object=lambda p=population: p.get(0),
                     )
                 )
         except StopRun as stop:
-            # A callback asked to halt -- a NaN guard, a wall-clock budget. That is
-            # early stopping, not failure: everything up to here is still a result.
+            # a callback raised StopRun: stop early and still return a result
             warnings.warn(f"run stopped at step {step}: {stop}", stacklevel=2)
             stopped_early = True
 
@@ -416,7 +408,7 @@ def optimize(
         error = exc
         raise
     finally:
-        # Fires even on OOM or SIGTERM, so a VideoWriter still flushes what it has.
+        # runs on success, error and interruption
         cbs.on_run_end(RunEnd(result=result, error=error))
 
 
@@ -438,13 +430,11 @@ def _run_rewrite(
 
     Returns ``(new_object, changed)``.
     """
-    # The base is appended LAST so its loss lands at index -1, measured under
-    # exactly the same conditions as the candidates it is compared against.
+    # the base goes last, so its score is scored[-1]
     candidates = [grammar.apply(base_obj, r) for r in rewrites] + [base_obj]
     batches = batchify(grammar, candidates, cost_budget=args.cost_budget, batch_size=args.batch_size)
 
-    # Once per rewrite event, not once per batch: every candidate and the base
-    # must be scored against identical state for the comparison to be fair.
+    # one proposal state per rewrite event, shared by every batch
     prop_state = grammar.state_for_proposals(state)
 
     def make_ctx(inner: int, n: int) -> StepContext:
@@ -486,7 +476,7 @@ def _run_rewrite(
             scaled = batch.per_object_grads() if batch.scale_grads_() else grads
             lo = -args.clip_grad if (args.clip_grad is not None and args.proposal_clip_grad) else None
             hi = args.clip_grad if args.proposal_clip_grad else None
-            # Predicted first-order decrease from one step: <clip(scaled_g), g>.
+            # predicted first-order decrease from one step: <clip(scaled_g), g>
             grad_terms.extend(
                 float((maybe_clamp(s, min=lo, max=hi) * g).sum().item()) for g, s in zip(grads, scaled)
             )

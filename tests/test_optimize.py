@@ -105,7 +105,7 @@ def test_simplicity_suppresses_growth():
     target = step_target(64)
     cheap = optimize(PiecewiseGrammar(target, allow_remove=False), base_args(w_simplicity=0.0))
     dear = optimize(
-        PiecewiseGrammar(target, w_segment=1.0, allow_remove=False),
+        PiecewiseGrammar(target, allow_remove=False),
         base_args(w_simplicity=1.0),
     )
     assert dear.final.n < cheap.final.n
@@ -265,8 +265,8 @@ def test_broken_callback_warns_but_does_not_kill_the_run():
 def test_remove_rewrites_are_reachable():
     """Both rule families must actually fire, not just Split."""
     target = torch.full((32,), 0.5)
-    g = PiecewiseGrammar(target, n_initial=6, allow_remove=True, w_segment=0.05)
+    g = PiecewiseGrammar(target, n_initial=6, allow_remove=True)
     rec = Recorder()
-    optimize(g, base_args(n_steps=120, propose_every=15, w_simplicity=1.0), [rec])
+    optimize(g, base_args(n_steps=120, propose_every=15, w_simplicity=0.05), [rec])
     kinds = {type(r).__name__ for ev in rec.rewrites for r in ev.accepted}
     assert "Remove" in kinds, f"only saw {kinds}"

@@ -1,20 +1,7 @@
-"""Side effects, as observers rather than as loop code.
+"""Run events and the callbacks that observe them.
 
-Upstream, :func:`optimize` had exactly one hook -- ``on_visualize(img, step,
-loss)`` -- and everything else lived in the entrypoint *after* the run returned:
-video encoding, metric dumps, checkpointing, the OOM retry. That has two
-consequences worth fixing. A run killed by OOM or by SLURM preemption writes
-nothing at all, because the saving code is never reached. And the loop
-unconditionally deep-copies the population to CPU on *every* step so that the
-history is available at the end, whether or not anyone wants it.
-
-Here every side effect is a callback, the run-end hook fires from a ``finally``
-so partial output survives a crash, and history is opt-in:
-:class:`StepEnd.get_object` is lazy, so a run that records nothing pays nothing.
-
-Callbacks are deliberately **not generic**. They are written constantly and by
-hand; parameterizing them on the object type would tax every one of them for no
-benefit the core can use. Object-shaped fields are typed ``Any``.
+``on_run_end`` fires from a ``finally``, including when the run raises.
+Object-typed fields are ``Any``.
 """
 
 from __future__ import annotations
@@ -76,7 +63,7 @@ class StepEnd:
     loss: float
     """Total loss including the simplicity term -- the ``$loss`` series."""
     loss_cont: float
-    """Loss without simplicity; the part that actually carries gradient."""
+    """Loss without the simplicity term."""
     loss_simplicity: float
     loss_ma: float
     lr: float
@@ -86,11 +73,7 @@ class StepEnd:
     _get_object: Callable[[], Any] = field(repr=False, default=lambda: None)
 
     def get_object(self) -> Any:
-        """Materialize the current object. **Lazy** -- costs nothing unless called.
-
-        Extraction can mean a full deep copy, so this stays a thunk. A recorder
-        that samples every 50th step pays 2% of what unconditional history costs.
-        """
+        """Materialize the current object; evaluated only when called."""
         return self._get_object()
 
 
@@ -99,6 +82,7 @@ class VisualizeEvent:
     step: int
     loss: float
     image: np.ndarray
+    """``(H, W, 3)`` uint8 frame from ``Grammar.visualize``."""
 
 
 @dataclass(frozen=True)
@@ -124,8 +108,7 @@ class RewriteEvent:
 class RunEnd:
     result: OptimizeResult[Any] | None
     error: BaseException | None
-    """Set when the run raised. ``result`` is then None and any partial output a
-    callback holds is all that will exist -- flush it here."""
+    """Set when the run raised; ``result`` is then None."""
 
 
 # -- protocol --------------------------------------------------------------
@@ -142,12 +125,7 @@ class Callback:
 
 
 class CallbackList(Callback):
-    """Fan out to several callbacks; one misbehaving callback cannot kill a run.
-
-    Exceptions are downgraded to warnings, with one exception:
-    :class:`StopRun` propagates, since that is a callback deliberately asking to
-    stop. Losing a PNG should not lose the run; a NaN guard should still work.
-    """
+    """Fan out to several callbacks. Exceptions become warnings, except :class:`StopRun`, which propagates."""
 
     def __init__(self, callbacks: Callback | Sequence[Callback] | None = None) -> None:
         if callbacks is None:
@@ -176,12 +154,11 @@ class CallbackList(Callback):
 # -- built-ins -------------------------------------------------------------
 
 SaveFn = Callable[[Any, Path], None]
-"""How to persist one object. Supplied by the caller, because the core cannot
-know how to serialize a grammar's objects."""
+"""Save one object to a path."""
 
 
 class TqdmProgress(Callback):
-    """Progress bar. Requires the ``progress`` extra; degrades to silence without it."""
+    """Progress bar. Needs the ``progress`` extra; warns and does nothing without it."""
 
     def __init__(self, **kwargs: Any) -> None:
         self._kwargs = kwargs
@@ -228,13 +205,7 @@ def _default_save_image(image: np.ndarray, path: Path) -> None:
 
 
 class VideoWriter(Callback):
-    """Collect frames and encode them at run end -- **including on failure**.
-
-    The flush happens in ``on_run_end``, which the loop calls from a ``finally``,
-    so a run killed by OOM or preemption still yields a video of everything up to
-    the crash. Upstream this encoding sat after ``optimize()`` returned and was
-    simply skipped when a run died.
-    """
+    """Collect frames and encode them to a video at run end, including when the run raised."""
 
     def __init__(self, path: str | Path, fps: int = 5, max_frames: int | None = None) -> None:
         self.path = Path(path)
@@ -294,12 +265,7 @@ class BestObjectWriter(Callback):
 
 
 class HistoryRecorder(Callback):
-    """Keep every ``every``-th object in memory. **Opt-in, and strided.**
-
-    Upstream this was unconditional and every step, which for a grammar holding
-    large tensors dominates both memory and runtime. Here nothing is recorded
-    unless this callback is installed.
-    """
+    """Keep the object of every ``every``-th step in memory."""
 
     def __init__(self, every: int = 1) -> None:
         if every < 1:
@@ -315,7 +281,7 @@ class HistoryRecorder(Callback):
 
 
 class CheckpointWriter(Callback):
-    """Write a snapshot every ``every`` steps, so a long run can be resumed or inspected."""
+    """Save the current object every ``every`` steps."""
 
     def __init__(self, directory: str | Path, every: int, save_fn: SaveFn,
                  name: str = "step_{step:07d}") -> None:
@@ -334,7 +300,7 @@ class CheckpointWriter(Callback):
 
 
 class ConfigWriter(Callback):
-    """Write a machine-readable record of what produced this run."""
+    """Write the args, grammar config, argv and start time as JSON at run start."""
 
     def __init__(self, path: str | Path, extra: Mapping[str, Any] | None = None) -> None:
         self.path = Path(path)
@@ -359,7 +325,7 @@ class ConfigWriter(Callback):
 
 
 class DebugPrinter(Callback):
-    """Print per-rewrite candidate rankings. Replaces the upstream ``if debug:`` blocks."""
+    """Print each rewrite event's ``top_k`` candidates, best improvement first."""
 
     def __init__(self, every: int = 1, top_k: int = 10) -> None:
         self.every = every
@@ -376,7 +342,7 @@ class DebugPrinter(Callback):
 
 
 class EarlyStopOnNaN(Callback):
-    """Halt as soon as the loss goes non-finite, instead of burning the remaining steps."""
+    """Raise :class:`StopRun` when the loss is non-finite."""
 
     def on_step_end(self, ev: StepEnd) -> None:
         if ev.loss != ev.loss or ev.loss in (float("inf"), float("-inf")):

@@ -57,7 +57,7 @@ def test_apply_all_expands_every_F_at_once():
 
 def test_grows_from_one_F_into_the_U():
     """A single straight F cannot draw a U; the grammar must add corners."""
-    g = TurtleGrammar(u_target(), w_symbol=1e-3)
-    res = optimize(g, OptimizeArgs(n_steps=600, lr=0.1, propose_every=50, seed=0))
+    g = TurtleGrammar(u_target())
+    res = optimize(g, OptimizeArgs(n_steps=600, lr=0.1, propose_every=50, w_simplicity=1e-3, seed=0))
     assert res.best.program.count("F") >= 3
     assert res.best_loss < 0.05 < loss_of(g, g.initial())
