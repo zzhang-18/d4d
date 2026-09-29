@@ -147,39 +147,8 @@ print(result.best)
 `list_spec`, `initial`, `propose`, `apply`, `conflicts` and `loss` are required. A `conflicts` that
 always returns True accepts one rewrite per rewrite event.
 
-`uv run python tests/lsystem.py` prints the string at every rewrite event (abridged):
-
-```
-step    0  loss 6.4551  F(1.10)
-step   50  loss 5.9559  F(0.84) R(+6°) F(0.84)
-step  100  loss 0.0633  F(1.47) R(+137°) F(0.93) R(+6°) F(0.93)
-step  150  loss 0.0228  F(1.26) R(+116°) F(1.06) R(+67°) F(0.86)
-step  250  loss 0.0054  F(1.12) R(+100°) F(1.09) R(+90°) F(1.03)
-best     loss 0.0068  F(1.00) R(+90°) F(1.02) R(+92°) F(1.01)
-```
-
-Starting from one `F`, each accepted `Expand` adds a corner without changing the loss, and descent
-bends it into the U. Once three `F`s can draw the U exactly, further expansions stop paying for
-themselves and the string stops growing. (`best` loss includes the `simplicity` term,
-`5 symbols × 1e-3`.)
-
-## The grammar interface
-
-A `Grammar` has five stages. Only `initial`, `propose`, `apply`, `conflicts` and `loss` are abstract.
-
-| stage | method | notes |
-|---|---|---|
-| construct | `initial`, `collate` | `collate` is the only way a batch is built; set `list_spec` to get it for free |
-| rewrite | `propose`, `apply` | `propose` receives the budget, so subsample before materializing |
-| combine | `conflicts`, `apply_all` | `conflicts` is required; the default `apply_all` folds `apply` in rank order |
-| loss | `loss`, `simplicity` | `loss` is differentiable and per-object; `simplicity` never is |
-| visualize | `visualize` | returns an `(H, W, 3)` uint8 frame; callbacks persist it |
-
 Optional hooks, for when a grammar needs them:
 
-- `init_state` / `step_state` / `state_for_proposals`: per-run state such as annealing schedules
-  or resampled points. `state_for_proposals` freezes the state so every candidate is scored
-  under the same conditions.
 - `cleanup`: canonicalize the object periodically, for example by merging duplicates or dropping
   degenerate parts.
 - `combine`: replace the greedy search, for admissibility checks that are not pairwise, or that
@@ -187,11 +156,10 @@ Optional hooks, for when a grammar needs them:
 - `object_cost`: the memory cost of one object, used to size batches.
 - a custom `collate` returning your own `ObjectCollection`, when a packed tensor layout is faster
   than the default list.
-- `config`: a JSON-able snapshot of hyperparameters, written by `ConfigWriter`.
-
-[`tests/toy.py`](tests/toy.py) is a second worked example. It fits a piecewise-constant function
-with two rule families (`Split` and `Remove`) and shows the trade-off between accuracy and
-program size.
+- `init_state` / `step_state` / `state_for_proposals`: per-run state such as annealing schedules
+  or resampled points. `state_for_proposals` freezes the state so every candidate is scored
+  under the same conditions.
+- `config`: a JSON-able snapshot of hyperparameters, used by `ConfigWriter`.
 
 ## Running the optimizer
 
