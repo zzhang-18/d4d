@@ -92,7 +92,7 @@ class StepContext:
 
 
 class Grammar(ABC, Generic[TObject, TCollection, TRewrite, TState]):
-    """Base class for a grammar. ``initial``, ``propose``, ``apply`` and ``loss`` are abstract.
+    """Base class for a grammar. ``initial``, ``propose``, ``apply``, ``conflicts`` and ``loss`` are abstract.
 
     Type parameters are ``Grammar[TObject, TCollection, TRewrite, TState]``, with
     defaults ``ListCollection[Any]``, ``Any`` and ``None`` for the last three::
@@ -154,9 +154,9 @@ class Grammar(ABC, Generic[TObject, TCollection, TRewrite, TState]):
             out = self.apply(out, rewrite)
         return out
 
+    @abstractmethod
     def conflicts(self, a: TRewrite, b: TRewrite) -> bool:
-        """Whether ``a`` and ``b`` cannot both be accepted. Default: True, so one rewrite per event."""
-        return True
+        """Whether ``a`` and ``b`` cannot both be accepted. Always True means one rewrite per event."""
 
     def combine(
         self,

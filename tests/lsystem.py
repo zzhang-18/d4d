@@ -20,6 +20,10 @@ import torch
 from d4d import ExtraMetrics, Grammar, ListCollection, ListSpec, StepContext
 
 
+####################
+# The Object
+####################
+
 @dataclass(frozen=True)
 class Turtle:
     """``program[i]`` is a symbol and ``params[i]`` its parameter; ``params`` is ``(len(program),)``."""
@@ -34,6 +38,10 @@ class Turtle:
         )
 
 
+####################
+# The Rewrites
+####################
+
 @dataclass(frozen=True)
 class Expand:
     """Apply ``F -> F R F`` to the ``F`` at position ``i``."""
@@ -41,15 +49,22 @@ class Expand:
     i: int
 
 
-Rewrite = Expand
+Rewrite = Expand  # Expand | Contract | ... once there are more rules
 
+
+####################
+# The Grammar
+####################
 
 # Grammar[TObject, TCollection, TRewrite, TState]
 class TurtleGrammar(Grammar[Turtle, ListCollection[Turtle], Rewrite, None]):
     """Draw a polyline that traces ``target``, an ``(N, 2)`` point set."""
 
     list_spec = ListSpec(
+        # How to extract the parameters from the object
         params_of=lambda o: [o.params],
+        # How to replace the parameters in the object.
+        # This must create a new instance of the object.
         with_params=lambda o, ts: replace(o, params=ts[0]),
         names=("params",),
     )
@@ -61,29 +76,40 @@ class TurtleGrammar(Grammar[Turtle, ListCollection[Turtle], Rewrite, None]):
 
     # -- construction ------------------------------------------------------
     def initial(self) -> Turtle:
+        """The starting object."""
         return Turtle("F", torch.tensor([1.0]))
 
     # -- rewriting ---------------------------------------------------------
     def propose(self, obj: Turtle, budget: int) -> list[Rewrite]:
+        """Sample different rewrites for the object."""
         if len(obj.program) + 2 > self.max_symbols:
             return []
         out = [Expand(i) for i, c in enumerate(obj.program) if c == "F"]
         return out[:budget] if budget > 0 else out
 
     def apply(self, obj: Turtle, rewrite: Rewrite) -> Turtle:
-        i, v = rewrite.i, obj.params.detach()
-        half = v[i : i + 1] / 2
-        return Turtle(
-            program=obj.program[:i] + "FRF" + obj.program[i + 1 :],
-            params=torch.cat([v[:i], half, torch.zeros(1), half, v[i + 1 :]]),
-        )
+        if isinstance(rewrite, Expand):
+            i, v = rewrite.i, obj.params.detach()
+            half = v[i : i + 1] / 2
+            return Turtle(
+                program=obj.program[:i] + "FRF" + obj.program[i + 1 :],
+                params=torch.cat([v[:i], half, torch.zeros(1), half, v[i + 1 :]]),
+            )
+        # elif isinstance(rewrite, Contract):
+        #     ...
+        else:
+            raise NotImplementedError(f"Unknown rewrite {rewrite}")
 
     # -- combining ---------------------------------------------------------
     def conflicts(self, a: Rewrite, b: Rewrite) -> bool:
+        """Whether two rewrites conflict."""
+        if isinstance(a, Expand) and isinstance(b, Expand):
+            return a.i == b.i
         return False
 
     def apply_all(self, base: Turtle, rewrites: Sequence[Rewrite]) -> Turtle:
-        out = base  # right to left, so base indices stay valid
+        """Optional. Apply right to left, so the base indices stay valid."""
+        out = base
         for r in sorted(rewrites, key=lambda r: -r.i):
             out = self.apply(out, r)
         return out
@@ -120,6 +146,7 @@ class TurtleGrammar(Grammar[Turtle, ListCollection[Turtle], Rewrite, None]):
         return losses, extra
 
     def simplicity(self, batch: ListCollection[Turtle], ctx: StepContext) -> list[float]:
+        """Optional. Usually the program size, weighted by OptimizeArgs.w_simplicity; never differentiated."""
         return [len(o.program) for o in batch.objects]
 
     def config(self) -> dict[str, Any]:

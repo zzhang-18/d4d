@@ -68,12 +68,12 @@ class TestCombine:
         _, accepted = g.combine((), ranked, [3.0, 2.0, 1.0], top_k=1)
         assert [r.tag for r in accepted] == ["c"]
 
-    def test_default_conflicts_accepts_exactly_one(self):
-        """The base Grammar.conflicts says everything conflicts."""
+    def test_all_conflicting_accepts_exactly_one(self):
+        """When every pair conflicts, only the best rewrite is accepted."""
 
         class AllConflict(SlotGrammar):
             def conflicts(self, a: Touch, b: Touch) -> bool:
-                return Grammar.conflicts(self, a, b)
+                return True
 
         g = AllConflict()
         ranked = [touch("c", 2), touch("b", 1), touch("a", 0)]

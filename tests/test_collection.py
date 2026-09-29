@@ -39,6 +39,9 @@ class BlobGrammar(Grammar[Blob, ListCollection[Blob], Any, None]):
     def apply(self, obj: Blob, rewrite: Any) -> Blob:
         return obj
 
+    def conflicts(self, a: Any, b: Any) -> bool:
+        return True
+
     def loss(self, batch, ctx, state):
         return torch.stack([(o.w.sum() + o.b.sum()) ** 2 for o in batch.objects]), {}
 

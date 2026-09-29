@@ -49,85 +49,103 @@ The whole grammar, typed. [`tests/lsystem.py`](tests/lsystem.py) is the runnable
 ```python
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-
 import torch
 
 from d4d import ExtraMetrics, Grammar, ListCollection, ListSpec, OptimizeArgs, StepContext, optimize
 
+####################
+# The Object
+####################
 
 @dataclass(frozen=True)
 class Turtle:
     program: str            # e.g. "FRFRF"
     params: torch.Tensor    # (len(program),); params[i] belongs to program[i]
 
+####################
+# The Rewrites
+####################
 
 @dataclass(frozen=True)
 class Expand:
-    i: int                  # apply F -> F R F at position i
+    i: int                  # position of the F to expand
 
 
 Rewrite = Expand            # Expand | Contract | ... once there are more rules
 
+####################
+# The Grammar
+####################
 
 # Grammar[TObject, TCollection, TRewrite, TState]
 class TurtleGrammar(Grammar[Turtle, ListCollection[Turtle], Rewrite, None]):
-    # how the default collate() takes an object's tensors out and puts new ones back
     list_spec = ListSpec(
+        # How to extract the parameters from the object
         params_of=lambda o: [o.params],
+        # How to replace the parameters in the object.
+        # This must create a new instance of the object.
         with_params=lambda o, ts: replace(o, params=ts[0]),
     )
 
     def __init__(self, target: torch.Tensor) -> None:
-        self.target = target                                # (N, 2) points to trace
+        self.target = target  # (N, 2) points to trace
 
     def initial(self) -> Turtle:
+        """The starting object."""
         return Turtle("F", torch.tensor([1.0]))
 
     def propose(self, obj: Turtle, budget: int) -> list[Rewrite]:
+        """Sample different rewrites for the object."""
         out = [Expand(i) for i, c in enumerate(obj.program) if c == "F"]
         return out[:budget] if budget > 0 else out
 
-    def apply(self, obj: Turtle, rewrite: Rewrite) -> Turtle:      # must not mutate obj
-        i, v = rewrite.i, obj.params.detach()
-        half = v[i : i + 1] / 2
-        return Turtle(obj.program[:i] + "FRF" + obj.program[i + 1 :],
-                      torch.cat([v[:i], half, torch.zeros(1), half, v[i + 1 :]]))
+    def apply(self, obj: Turtle, rewrite: Rewrite) -> Turtle:
+        if isinstance(rewrite, Expand):
+            i, v = rewrite.i, obj.params.detach()
+            half = v[i : i + 1] / 2
+            return Turtle(obj.program[:i] + "FRF" + obj.program[i + 1 :],
+                          torch.cat([v[:i], half, torch.zeros(1), half, v[i + 1 :]]))
+        # elif isinstance(rewrite, Contract):
+        #     ...
+        else:
+            raise NotImplementedError(f"Unknown rewrite {rewrite}")
 
-    # optional: accept several Expands per rewrite event
     def conflicts(self, a: Rewrite, b: Rewrite) -> bool:
+        """Whether two rewrites conflict."""
+        if isinstance(a, Expand) and isinstance(b, Expand):
+            return a.i == b.i
         return False
 
     def apply_all(self, base: Turtle, rewrites: Sequence[Rewrite]) -> Turtle:
-        for r in sorted(rewrites, key=lambda r: -r.i):      # right to left keeps base indices valid
+        """Optional. Apply right to left, so the base indices stay valid."""
+        for r in sorted(rewrites, key=lambda r: -r.i):
             base = self.apply(base, r)
         return base
-
-    def _loss_one(self, obj: Turtle) -> torch.Tensor:
-        """() -- distance from the drawn polyline to target."""
-        ...
 
     def loss(
         self, batch: ListCollection[Turtle], ctx: StepContext, state: None
     ) -> tuple[torch.Tensor, ExtraMetrics]:
-        losses = torch.stack([self._loss_one(o) for o in batch.objects])   # (B,)
-        return losses, {}                                   # no per-object diagnostics
+        """(B,) differentiable losses, plus per-object diagnostics (none here)."""
+        return torch.stack([self._loss_one(o) for o in batch.objects]), {}
+
+    def _loss_one(self, obj: Turtle) -> torch.Tensor:
+        """returns: scalar, distance from the drawn polyline to target."""
+        ...
 
     def simplicity(self, batch: ListCollection[Turtle], ctx: StepContext) -> list[float]:
-        return [len(o.program) for o in batch.objects]     # not differentiated
+        """Optional. Usually the program size, weighted by OptimizeArgs.w_simplicity; never differentiated."""
+        return [len(o.program) for o in batch.objects]
 
 
 result = optimize(
-    TurtleGrammar(u_target()),                              # (48, 2) U-shaped target; see tests/lsystem.py
+    TurtleGrammar(u_target()),
     OptimizeArgs(n_steps=600, lr=0.1, propose_every=50, w_simplicity=1e-3, seed=0),
 )
 print(result.best)
 ```
 
-- `list_spec`, `initial`, `propose`, `apply` and `loss` are a complete grammar. `conflicts` and
-  `apply_all` are optional: by default every pair of rewrites conflicts, so one rewrite is accepted
-  per rewrite event.
-- `simplicity` prices program size. It gets no gradient; `OptimizeArgs.w_simplicity` weights it when
-  ranking proposals and in the logged `$loss`, which stops the string from growing without bound.
+`list_spec`, `initial`, `propose`, `apply`, `conflicts` and `loss` are required. A `conflicts` that
+always returns True accepts one rewrite per rewrite event.
 
 `uv run python tests/lsystem.py` prints the string at every rewrite event (abridged):
 
@@ -147,13 +165,13 @@ themselves and the string stops growing. (`best` loss includes the `simplicity` 
 
 ## The grammar interface
 
-A `Grammar` has five stages. Only `initial`, `propose`, `apply` and `loss` are abstract.
+A `Grammar` has five stages. Only `initial`, `propose`, `apply`, `conflicts` and `loss` are abstract.
 
 | stage | method | notes |
 |---|---|---|
 | construct | `initial`, `collate` | `collate` is the only way a batch is built; set `list_spec` to get it for free |
 | rewrite | `propose`, `apply` | `propose` receives the budget, so subsample before materializing |
-| combine | `conflicts`, `apply_all` | default: every pair conflicts, and `apply_all` folds `apply` in rank order |
+| combine | `conflicts`, `apply_all` | `conflicts` is required; the default `apply_all` folds `apply` in rank order |
 | loss | `loss`, `simplicity` | `loss` is differentiable and per-object; `simplicity` never is |
 | visualize | `visualize` | returns an `(H, W, 3)` uint8 frame; callbacks persist it |
 

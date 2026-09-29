@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from itertools import combinations
+
 import pytest
 import torch
 from lsystem import Expand, Turtle, TurtleGrammar, u_target
@@ -43,11 +45,11 @@ def test_expand_is_exactly_loss_preserving():
 
 
 def test_apply_all_expands_every_F_at_once():
-    """conflicts() is False, so apply_all must splice all rewrites against base indices."""
+    """Distinct Expands never conflict, so apply_all must splice them all against base indices."""
     g = TurtleGrammar(u_target())
     obj = bent()
     rewrites = g.propose(obj, budget=0)
-    assert not any(g.conflicts(a, b) for a in rewrites for b in rewrites)
+    assert not any(g.conflicts(a, b) for a, b in combinations(rewrites, 2))
 
     joint = g.apply_all(obj, rewrites)
     assert joint.program == "FRF" + "R" + "FRF" + "R" + "FRF"
