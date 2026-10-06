@@ -46,6 +46,10 @@ class ObjectCollection(ABC, Sequence[TObject]):
     def parameters(self) -> list[torch.Tensor]:
         """Leaf tensors (``requires_grad`` set, any shape) handed to the torch optimizer."""
 
+    def object_parameters(self, idx: int) -> list[torch.Tensor]:
+        """Object ``idx``'s leaf tensors, in the order ``parameters()`` lists them. Needed by ``keep_optimizer_state``."""
+        raise NotImplementedError(f"{type(self).__name__} does not expose per-object parameters")
+
     @abstractmethod
     def parameter_names(self) -> list[str]:
         """Human-readable names, positionally aligned with ``parameters()``."""
@@ -127,6 +131,9 @@ class ListCollection(ObjectCollection[TObject]):
 
     def parameters(self) -> list[torch.Tensor]:
         return [t for ts in self.params for t in ts]
+
+    def object_parameters(self, idx: int) -> list[torch.Tensor]:
+        return self.params[idx]
 
     def parameter_names(self) -> list[str]:
         out: list[str] = []

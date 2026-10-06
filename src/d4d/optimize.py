@@ -61,6 +61,11 @@ class OptimizeArgs:
     """Clip gradient values to [-clip_grad, clip_grad]. 'None' disables."""
     clip_grad_mode: Literal["abs", "rel"] = "abs"
     """'abs' clips at 'clip_grad'; 'rel' clips at 'clip_grad / lr'."""
+    keep_optimizer_state: bool = False
+    """Keep the optimizer across rewrite and cleanup events instead of rebuilding it. An event that changes nothing is
+    a no-op for the optimizer. After an accepted rewrite (or a cleanup that changed the population), per-row state is
+    carried through 'Grammar.param_correspondence'. Proposal scoring starts from the same state. 'False' rebuilds a
+    fresh optimizer at every event (the d4d 0.1.0 behavior)."""
     reduce_lr_factor: float = 0.5
     reduce_lr_patience: int = 2
     reduce_lr_min_lr: float = 1e-4
@@ -177,6 +182,65 @@ def _merge_extra(acc: dict[str, list[float]], new: ExtraMetrics, n: int) -> None
         acc.setdefault(key, []).append(sum(seq) / len(seq) if seq else 0.0)
 
 
+def _identity_maps(params: Sequence[torch.Tensor]) -> list[torch.Tensor | None]:
+    return [torch.arange(p.shape[0], device=p.device) if p.dim() > 0 else None for p in params]
+
+
+def _transfer_state(
+    src_opt: Optimizer,
+    src_params: Sequence[torch.Tensor],
+    dst_opt: Optimizer,
+    dst_params: Sequence[torch.Tensor],
+    maps: Sequence[torch.Tensor | None] | None,
+) -> None:
+    """Seed ``dst_opt``'s state for ``dst_params`` from ``src_opt``'s state for ``src_params``, row by row.
+
+    ``maps[i][r]`` is the row of ``src_params[i]`` that row ``r`` of ``dst_params[i]`` continues (-1 = a new row).
+    Per-element state (e.g. Adam's ``exp_avg`` / ``exp_avg_sq``, SGD's ``momentum_buffer``) is gathered by row.
+    Scalars (e.g. ``step``) are copied. New rows get zero first moments, and second moments equal to the mean over the
+    carried rows. A zero second moment under an inherited step count would make their first Adam step ~3x ``lr``.
+    Tensors with no map, no state, or no carried rows start fresh.
+    """
+    if maps is None:
+        return
+    for p_src, p_dst, m in zip(src_params, dst_params, maps):
+        st = src_opt.state.get(p_src)
+        if m is None or not st or p_dst.dim() == 0 or p_dst.shape[1:] != p_src.shape[1:]:
+            continue
+        m = m.to(p_dst.device)
+        keep = m >= 0
+        if not bool(keep.any()):
+            continue
+        new: dict[str, Any] = {}
+        for k, v in st.items():
+            if torch.is_tensor(v) and v.dim() > 0 and v.shape == p_src.shape:
+                out = torch.zeros_like(p_dst)
+                carried = v[m[keep]]
+                out[keep] = carried
+                if k in ("exp_avg_sq", "max_exp_avg_sq") and not bool(keep.all()):
+                    out[~keep] = carried.mean(0, keepdim=True).expand_as(out[~keep])
+                new[k] = out
+            elif torch.is_tensor(v):
+                new[k] = v.clone()
+            else:
+                new[k] = v
+        dst_opt.state[p_dst] = new
+
+
+def _carry(
+    grammar: Grammar[Any, Any, Any, Any],
+    src_opt: Optimizer,
+    src_params: Sequence[torch.Tensor],
+    old_obj: Any,
+    dst_opt: Optimizer,
+    dst_params: Sequence[torch.Tensor],
+    new_obj: Any,
+) -> None:
+    """``_transfer_state`` through ``grammar.param_correspondence(old_obj, new_obj)`` (identity when they are the same object)."""
+    maps = _identity_maps(dst_params) if new_obj is old_obj else grammar.param_correspondence(old_obj, new_obj)
+    _transfer_state(src_opt, src_params, dst_opt, dst_params, maps)
+
+
 def optimize(
     grammar: Grammar[TObject, TCollection, TRewrite, TState],
     args: OptimizeArgs,
@@ -280,10 +344,19 @@ def optimize(
 
                 # -- 2. periodic cleanup -----------------------------------
                 if step % args.cleanup_every == 0:
-                    population = grammar.cleanup(population).requires_grad_()
-                    if not rewrite:
-                        # rewrite steps rebuild it in step 3
-                        opt, sched = build_optimizer(population.parameters(), step, cur_lr)
+                    cleaned = grammar.cleanup(population)
+                    if not args.keep_optimizer_state:
+                        population = cleaned.requires_grad_()
+                        if not rewrite:
+                            # rewrite steps rebuild it in step 3
+                            opt, sched = build_optimizer(population.parameters(), step, cur_lr)
+                    elif cleaned is not population:  # changed: carry state row by row; unchanged: keep everything
+                        cleaned = cleaned.requires_grad_()
+                        new_opt, new_sched = build_optimizer(cleaned.parameters(), step, cur_lr)
+                        for i in range(len(cleaned)):
+                            _carry(grammar, opt, population.object_parameters(i), population.get(i, detach=False),
+                                   new_opt, cleaned.object_parameters(i), cleaned.get(i, detach=False))
+                        population, opt, sched = cleaned, new_opt, new_sched
 
                 # -- 3. rewrite --------------------------------------------
                 if rewrite:
@@ -308,15 +381,24 @@ def optimize(
                             grammar=grammar, args=args, base_obj=base_obj, rewrites=rewrites,
                             state=state, step=step, cur_lr=cur_lr, rewrite_index=n_rewrites,
                             build_optimizer=build_optimizer, clip_value=clip_value, cbs=cbs,
+                            live_opt=opt if args.keep_optimizer_state else None,
+                            live_params=population.object_parameters(0) if args.keep_optimizer_state else None,
                         )
                         if changed:
-                            population = grammar.collate([new_obj]).requires_grad_()
+                            new_pop = grammar.collate([new_obj]).requires_grad_()
+                            if args.keep_optimizer_state:
+                                new_opt, new_sched = build_optimizer(new_pop.parameters(), step, cur_lr)
+                                _carry(grammar, opt, population.object_parameters(0), base_obj,
+                                       new_opt, new_pop.object_parameters(0), new_obj)
+                                opt, sched = new_opt, new_sched
+                            population = new_pop
                             if args.scheduler == "ReduceLROnPlateau":
                                 if args.increase_lr_after_proposal:
                                     cur_lr = min(args.lr, cur_lr / args.reduce_lr_factor)
                                 if args.reset_lr_after_proposal:
                                     cur_lr = args.lr
-                    opt, sched = build_optimizer(population.parameters(), step, cur_lr)
+                    if not args.keep_optimizer_state:
+                        opt, sched = build_optimizer(population.parameters(), step, cur_lr)
 
                 # -- 4. continuous step ------------------------------------
                 ctx = StepContext(
@@ -425,6 +507,8 @@ def _run_rewrite(
     build_optimizer: Callable[..., tuple[Optimizer, LRScheduler | None]],
     clip_value: Callable[[float], float | None],
     cbs: CallbackList,
+    live_opt: Optimizer | None = None,
+    live_params: Sequence[torch.Tensor] | None = None,
 ) -> tuple[Any, bool]:
     """Score candidate rewrites and combine the winners.
 
@@ -447,8 +531,14 @@ def _run_rewrite(
     grad_terms: list[float] = []
 
     if args.proposal_criterion == "loss":
+        offset = 0
         for batch in batches:
             opt, _ = build_optimizer(batch.parameters(), step, cur_lr)
+            if live_opt is not None and live_params is not None:  # keep_optimizer_state: start from the live state
+                for j in range(len(batch)):
+                    _carry(grammar, live_opt, live_params, base_obj, opt, batch.object_parameters(j),
+                           candidates[offset + j])
+            offset += len(batch)
             for inner in range(args.proposal_steps):
                 opt.zero_grad()
                 losses, _ = grammar.loss(batch, make_ctx(inner, len(batch)), prop_state)

@@ -229,6 +229,16 @@ class Grammar(ABC, Generic[TObject, TCollection, TRewrite, TState]):
         """Canonicalize a batch; called every ``cleanup_every`` steps."""
         return batch
 
+    def param_correspondence(self, old: TObject, new: TObject) -> Sequence[torch.Tensor | None] | None:
+        """Where each row of ``new``'s tensors came from in ``old``; used by ``OptimizeArgs.keep_optimizer_state``.
+
+        One entry per tensor of ``new`` (in ``collate([new]).parameters()`` order): a ``(rows,)`` long tensor of row
+        indices into the matching tensor of ``old`` (``-1`` = a new row), or ``None`` (no correspondence). ``new`` is
+        the result of a rewrite (``apply`` / ``apply_all``) or a cleanup of ``old``. Default ``None``: ``new`` starts
+        with a fresh optimizer state.
+        """
+        return None
+
     # ---- reproducibility -------------------------------------------------
 
     def config(self) -> Mapping[str, Any]:
