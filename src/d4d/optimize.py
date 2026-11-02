@@ -13,7 +13,7 @@ Each step:
 from __future__ import annotations
 
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass
 from typing import Any, Generic, Literal
 
@@ -102,6 +102,16 @@ class OptimizeArgs:
     """Floor: accept only if 'base_loss - loss > accept_rel_eps * |base_loss|'. 'None' disables."""
     accept_eps_op: Literal["and", "or"] = "or"
     """Whether both floors or either must be cleared. With both disabled, the test is 'base_loss - loss > 0'."""
+    proposal_stage2_steps: int = 0
+    """Two-stage scoring ('loss' criterion only). '> 0': the 'proposal_stage2_top' best candidates of each
+    'Grammar.rewrite_group' by the first-stage score (improving or not), and the base, are re-scored by a fresh
+    scoring pass of this many steps; only they can be accepted, ranked by that score. '0' disables."""
+    proposal_stage2_top: int = 8
+    """Candidates per group that enter the second stage."""
+    accept_verify: bool = False
+    """Verified combination ('loss' criterion only). When 'Grammar.combine' accepts two or more rewrites, the prefixes
+    of its accepted list (best first) and the base are re-scored by a fresh scoring pass (the second stage's steps
+    when two-stage scoring is on); the best prefix is kept, or nothing if no prefix beats the base."""
 
     # Batching
     cost_budget: int = 8192
@@ -140,6 +150,12 @@ class OptimizeArgs:
             raise ValueError(f"accept_eps_op must be 'and' or 'or', got {self.accept_eps_op!r}")
         if self.proposal_steps < 0:
             raise ValueError(f"proposal_steps must be >= 0, got {self.proposal_steps}")
+        if self.proposal_stage2_steps < 0:
+            raise ValueError(f"proposal_stage2_steps must be >= 0, got {self.proposal_stage2_steps}")
+        if self.proposal_stage2_top < 1:
+            raise ValueError(f"proposal_stage2_top must be >= 1, got {self.proposal_stage2_top}")
+        if (self.proposal_stage2_steps > 0 or self.accept_verify) and self.proposal_criterion != "loss":
+            raise ValueError("proposal_stage2_steps and accept_verify need proposal_criterion='loss'")
 
 
 @dataclass
@@ -530,16 +546,17 @@ def _run_rewrite(
     raw_losses: list[float] = []
     grad_terms: list[float] = []
 
-    if args.proposal_criterion == "loss":
+    def descend_and_eval(objs: list[Any], obj_batches: list[Any], n_steps: int) -> list[float]:
+        """'loss' criterion: ``n_steps`` of a fresh scoring optimizer per batch, then the raw losses."""
+        out: list[float] = []
         offset = 0
-        for batch in batches:
+        for batch in obj_batches:
             opt, _ = build_optimizer(batch.parameters(), step, cur_lr)
             if live_opt is not None and live_params is not None:  # keep_optimizer_state: start from the live state
                 for j in range(len(batch)):
-                    _carry(grammar, live_opt, live_params, base_obj, opt, batch.object_parameters(j),
-                           candidates[offset + j])
+                    _carry(grammar, live_opt, live_params, base_obj, opt, batch.object_parameters(j), objs[offset + j])
             offset += len(batch)
-            for inner in range(args.proposal_steps):
+            for inner in range(n_steps):
                 opt.zero_grad()
                 losses, _ = grammar.loss(batch, make_ctx(inner, len(batch)), prop_state)
                 losses.sum().backward()
@@ -550,9 +567,25 @@ def _run_rewrite(
                 opt.step()
                 batch.project_to_valid_()
         with torch.no_grad():
-            for batch in batches:
-                losses, _ = grammar.loss(batch, make_ctx(args.proposal_steps, len(batch)), prop_state)
-                raw_losses.extend(losses.tolist())
+            for batch in obj_batches:
+                losses, _ = grammar.loss(batch, make_ctx(n_steps, len(batch)), prop_state)
+                out.extend(losses.tolist())
+        return out
+
+    def simplicity_of(obj_batches: list[Any]) -> list[float]:
+        out: list[float] = []
+        for batch in obj_batches:
+            out.extend(grammar.simplicity(batch, make_ctx(0, len(batch))))
+        return out
+
+    def rescore(objs: list[Any], n_steps: int) -> list[float]:
+        """A fresh 'loss' scoring pass over ``objs``: loss + w_simplicity * simplicity."""
+        obj_batches = batchify(grammar, objs, cost_budget=args.cost_budget, batch_size=args.batch_size)
+        raw = descend_and_eval(objs, obj_batches, n_steps)
+        return [l + s * args.w_simplicity for l, s in zip(raw, simplicity_of(obj_batches))]
+
+    if args.proposal_criterion == "loss":
+        raw_losses.extend(descend_and_eval(candidates, batches, args.proposal_steps))
 
     elif args.proposal_criterion in ("grad", "grad_only"):
         for batch in batches:
@@ -573,9 +606,7 @@ def _run_rewrite(
     else:
         raise ValueError(f"Unknown proposal_criterion: {args.proposal_criterion}")
 
-    simplicity: list[float] = []
-    for batch in batches:
-        simplicity.extend(grammar.simplicity(batch, make_ctx(0, len(batch))))
+    simplicity = simplicity_of(batches)
 
     if args.proposal_criterion == "loss":
         scored = [l + s * args.w_simplicity for l, s in zip(raw_losses, simplicity)]
@@ -587,18 +618,48 @@ def _run_rewrite(
         ]
 
     cand_losses, base_loss = scored[:-1], scored[-1]
-    ranked = _rank_improving(args, base_loss, cand_losses)
+    # the scores acceptance ranks by: the first stage's, or the second stage's for its candidates only
+    pool, pool_losses, pool_base = list(range(len(rewrites))), list(cand_losses), base_loss
+    stage2: list[int] = []
+    stage2_losses: list[float] = []
+    stage2_base: float | None = None
+    if args.proposal_stage2_steps > 0 and rewrites:
+        groups: dict[Hashable, list[int]] = {}
+        for i, r in enumerate(rewrites):
+            groups.setdefault(grammar.rewrite_group(r), []).append(i)
+        top = args.proposal_stage2_top
+        stage2 = sorted(i for g in groups.values() for i in sorted(g, key=lambda i: cand_losses[i])[:top])
+        sc2 = rescore([grammar.apply(base_obj, rewrites[i]) for i in stage2] + [base_obj], args.proposal_stage2_steps)
+        stage2_losses, stage2_base = sc2[:-1], sc2[-1]
+        pool, pool_losses, pool_base = stage2, stage2_losses, stage2_base
+    ranked = [pool[j] for j in _rank_improving(args, pool_base, pool_losses)]
+    loss_of = dict(zip(pool, pool_losses))
     new_obj, accepted = base_obj, []
+    combined: list[Any] = []
+    verify_losses: list[float] = []
+    verify_base: float | None = None
     if ranked:
         new_obj, accepted = grammar.combine(
-            base_obj, [rewrites[i] for i in ranked], [base_loss - cand_losses[i] for i in ranked],
+            base_obj, [rewrites[i] for i in ranked], [pool_base - loss_of[i] for i in ranked],
             top_k=args.accept_top_k,
         )
+        if args.accept_verify and len(accepted) >= 2:
+            combined = list(accepted)
+            prefixes = [grammar.apply_all(base_obj, combined[:k]) for k in range(1, len(combined))] + [new_obj]
+            vs = rescore(prefixes + [base_obj], args.proposal_stage2_steps or args.proposal_steps)
+            verify_losses, verify_base = vs[:-1], vs[-1]
+            k = min(range(len(prefixes)), key=lambda j: verify_losses[j])
+            if verify_losses[k] < verify_base:
+                new_obj, accepted = prefixes[k], combined[: k + 1]
+            else:
+                new_obj, accepted = base_obj, []
     cbs.on_rewrite(
         RewriteEvent(
             step=step, rewrite_index=rewrite_index, base_loss=base_loss,
             losses=tuple(cand_losses), rewrites=tuple(rewrites), accepted=tuple(accepted),
             changed=bool(accepted), n_proposals=len(rewrites), elapsed=grammar.elapsed(),
+            stage2=tuple(stage2), stage2_losses=tuple(stage2_losses), stage2_base_loss=stage2_base,
+            combined=tuple(combined), verify_losses=tuple(verify_losses), verify_base_loss=verify_base,
         )
     )
     return new_obj, bool(accepted)

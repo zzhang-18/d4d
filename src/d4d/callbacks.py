@@ -98,6 +98,18 @@ class RewriteEvent:
     changed: bool
     n_proposals: int
     elapsed: float
+    stage2: tuple[int, ...] = ()
+    """Two-stage scoring (``OptimizeArgs.proposal_stage2_steps``): indices into ``rewrites`` that were re-scored.
+    Only they could be accepted. ``losses`` / ``base_loss`` stay the first-stage scores."""
+    stage2_losses: tuple[float, ...] = ()
+    """Second-stage scores, aligned with ``stage2``."""
+    stage2_base_loss: float | None = None
+    combined: tuple[Any, ...] = ()
+    """Verified combination (``OptimizeArgs.accept_verify``): the set ``Grammar.combine`` picked, when it had two or
+    more rewrites; ``accepted`` is the kept prefix of it (possibly empty)."""
+    verify_losses: tuple[float, ...] = ()
+    """Scores of the prefixes of ``combined`` (lengths 1, 2, ...), against ``verify_base_loss``."""
+    verify_base_loss: float | None = None
 
     def improvements(self) -> list[float]:
         """Per-candidate loss improvement over the base. Negative means worse."""

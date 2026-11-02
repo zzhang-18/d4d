@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Generic, Literal
 
 import torch
@@ -153,6 +153,11 @@ class Grammar(ABC, Generic[TObject, TCollection, TRewrite, TState]):
         for rewrite in rewrites:
             out = self.apply(out, rewrite)
         return out
+
+    def rewrite_group(self, rewrite: TRewrite) -> Hashable:
+        """The group a rewrite competes in for two-stage scoring (``OptimizeArgs.proposal_stage2_top`` per group),
+        e.g. its kind. Default: one group."""
+        return None
 
     @abstractmethod
     def conflicts(self, a: TRewrite, b: TRewrite) -> bool:
