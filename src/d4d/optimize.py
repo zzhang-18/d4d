@@ -56,6 +56,8 @@ class OptimizeArgs:
 
     # GD-related
     optimizer: Literal["Adam", "SGD"] = "Adam"
+    adam_betas: tuple[float, float] = (0.9, 0.999)
+    """Adam's (beta1, beta2) for every optimizer the loop builds (main loop and scoring); the default is torch's."""
     scheduler: Literal["none", "ReduceLROnPlateau", "AdaptiveLR", "LinearLR", "ExponentialLR", "CosineSegment"] = "none"
     """'CosineSegment' restarts the LR at 'lr' at every optimizer rebuild of the main loop (cleanup and rewrite steps)
     and decays it by a cosine to 'lr * segment_end_factor' over the 'min(propose_every, cleanup_every)' steps up to the
@@ -177,6 +179,8 @@ class OptimizeArgs:
             raise ValueError(f"proposal_stage2_top must be >= 1, got {self.proposal_stage2_top}")
         if (self.proposal_stage2_steps > 0 or self.accept_verify) and self.proposal_criterion != "loss":
             raise ValueError("proposal_stage2_steps and accept_verify need proposal_criterion='loss'")
+        if not all(0.0 <= b < 1.0 for b in self.adam_betas):
+            raise ValueError(f"adam_betas must be in [0, 1), got {self.adam_betas}")
         if self.proposal_lr_mult <= 0:
             raise ValueError(f"proposal_lr_mult must be > 0, got {self.proposal_lr_mult}")
         if self.proposal_eval not in ("loss", "grammar"):
@@ -316,7 +320,7 @@ def optimize(
         """A fresh optimizer and scheduler over ``parameters`` (leaf tensors, any shape); ``main``: a main-loop
         rebuild (the only kind 'warmup_steps' applies to; scoring passes never step the scheduler)."""
         if args.optimizer == "Adam":
-            opt: Optimizer = torch.optim.Adam(parameters, lr=lr)
+            opt: Optimizer = torch.optim.Adam(parameters, lr=lr, betas=args.adam_betas)
         elif args.optimizer == "SGD":
             opt = torch.optim.SGD(parameters, lr=lr)
         else:  # TODO: other optimizers?

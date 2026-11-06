@@ -145,3 +145,14 @@ def test_warmup_validation():
         base_args(warmup_steps=5, scheduler="LinearLR")
     with pytest.raises(ValueError):
         base_args(proposal_warmup_steps=-1)
+
+
+def test_adam_betas():
+    r1, r2, r3 = Recorder(), Recorder(), Recorder()
+    optimize(PiecewiseGrammar(step_target(64)), base_args(n_steps=21), [r1])
+    optimize(PiecewiseGrammar(step_target(64)), base_args(n_steps=21, adam_betas=(0.9, 0.999)), [r2])
+    optimize(PiecewiseGrammar(step_target(64)), base_args(n_steps=21, adam_betas=(0.95, 0.999)), [r3])
+    assert r1.rewrites[0].losses == r2.rewrites[0].losses  # the default is torch's
+    assert r1.rewrites[0].losses != r3.rewrites[0].losses
+    with pytest.raises(ValueError):
+        base_args(adam_betas=(1.0, 0.999))
