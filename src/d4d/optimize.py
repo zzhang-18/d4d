@@ -12,13 +12,14 @@ Each step:
 
 from __future__ import annotations
 
+import math
 import warnings
 from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass
 from typing import Any, Generic, Literal
 
 import torch
-from torch.optim.lr_scheduler import ExponentialLR, LinearLR, LRScheduler, ReduceLROnPlateau
+from torch.optim.lr_scheduler import ExponentialLR, LambdaLR, LinearLR, LRScheduler, ReduceLROnPlateau
 from torch.optim.optimizer import Optimizer
 from typing_extensions import TypeVar
 
@@ -55,7 +56,13 @@ class OptimizeArgs:
 
     # GD-related
     optimizer: Literal["Adam", "SGD"] = "Adam"
-    scheduler: Literal["none", "ReduceLROnPlateau", "AdaptiveLR", "LinearLR", "ExponentialLR"] = "none"
+    scheduler: Literal["none", "ReduceLROnPlateau", "AdaptiveLR", "LinearLR", "ExponentialLR", "CosineSegment"] = "none"
+    """'CosineSegment' restarts the LR at 'lr' at every optimizer rebuild of the main loop (cleanup and rewrite steps)
+    and decays it by a cosine to 'lr * segment_end_factor' over the 'min(propose_every, cleanup_every)' steps up to the
+    next rebuild (warm restarts per round; held at the end value if no rebuild comes, e.g. with keep_optimizer_state).
+    Proposal scoring then starts from 'lr' too, not from the decayed end-of-round value."""
+    segment_end_factor: float = 0.1
+    """'CosineSegment': the LR at the end of a segment, as a fraction of 'lr'."""
     lr: float = 0.5
     clip_grad: float | None = 2.0
     """Clip gradient values to [-clip_grad, clip_grad]. 'None' disables."""
@@ -90,6 +97,12 @@ class OptimizeArgs:
     the loss. 'grad' uses 'loss - lr * <clip(g), g>' from one backward pass. 'grad_only'
     drops the loss term."""
     proposal_steps: int = 2
+    proposal_lr_mult: float = 1.0
+    """The scoring optimizer's LR (all 'loss'-criterion scoring passes) as a multiple of the main loop's current LR."""
+    proposal_eval: Literal["loss", "grammar"] = "loss"
+    """What a candidate's score is after its scoring steps ('loss' criterion only): 'loss' evaluates 'Grammar.loss';
+    'grammar' asks 'Grammar.proposal_score' (e.g. a hard metric of the exported object; lower is better). The
+    simplicity term is added either way."""
     proposal_size: int = 64
     """Candidate budget passed to 'Grammar.propose'. '0' means all."""
     proposal_clip_grad: bool = True
@@ -156,6 +169,14 @@ class OptimizeArgs:
             raise ValueError(f"proposal_stage2_top must be >= 1, got {self.proposal_stage2_top}")
         if (self.proposal_stage2_steps > 0 or self.accept_verify) and self.proposal_criterion != "loss":
             raise ValueError("proposal_stage2_steps and accept_verify need proposal_criterion='loss'")
+        if self.proposal_lr_mult <= 0:
+            raise ValueError(f"proposal_lr_mult must be > 0, got {self.proposal_lr_mult}")
+        if self.proposal_eval not in ("loss", "grammar"):
+            raise ValueError(f"proposal_eval must be 'loss' or 'grammar', got {self.proposal_eval!r}")
+        if self.proposal_eval == "grammar" and self.proposal_criterion != "loss":
+            raise ValueError("proposal_eval='grammar' needs proposal_criterion='loss'")
+        if not 0.0 <= self.segment_end_factor <= 1.0:
+            raise ValueError(f"segment_end_factor must be in [0, 1], got {self.segment_end_factor}")
 
 
 @dataclass
@@ -305,7 +326,14 @@ def optimize(
             sched = LinearLR(opt, start_factor=1.0, end_factor=0.0, total_iters=max(args.n_steps - cur_step, 1))
         elif args.scheduler == "ExponentialLR":
             sched = ExponentialLR(opt, gamma=0.01 ** (1 / args.n_steps))
+        elif args.scheduler == "CosineSegment":
+            seg_len, end = max(min(args.propose_every, args.cleanup_every), 1), args.segment_end_factor
+            sched = LambdaLR(opt, lambda t: end + (1.0 - end) * 0.5 * (1.0 + math.cos(math.pi * min(t, seg_len) / seg_len)))
         return opt, sched
+
+    def restart_lr() -> float:
+        """The LR a main-loop rebuild starts from: 'lr' with warm restarts ('CosineSegment'), else the current one."""
+        return args.lr if args.scheduler == "CosineSegment" else cur_lr
 
     def clip_value(lr: float) -> float | None:
         if args.clip_grad is None:
@@ -365,10 +393,10 @@ def optimize(
                         population = cleaned.requires_grad_()
                         if not rewrite:
                             # rewrite steps rebuild it in step 3
-                            opt, sched = build_optimizer(population.parameters(), step, cur_lr)
+                            opt, sched = build_optimizer(population.parameters(), step, restart_lr())
                     elif cleaned is not population:  # changed: carry state row by row; unchanged: keep everything
                         cleaned = cleaned.requires_grad_()
-                        new_opt, new_sched = build_optimizer(cleaned.parameters(), step, cur_lr)
+                        new_opt, new_sched = build_optimizer(cleaned.parameters(), step, restart_lr())
                         for i in range(len(cleaned)):
                             _carry(grammar, opt, population.object_parameters(i), population.get(i, detach=False),
                                    new_opt, cleaned.object_parameters(i), cleaned.get(i, detach=False))
@@ -395,7 +423,7 @@ def optimize(
                         n_rewrites += 1
                         new_obj, changed = _run_rewrite(
                             grammar=grammar, args=args, base_obj=base_obj, rewrites=rewrites,
-                            state=state, step=step, cur_lr=cur_lr, rewrite_index=n_rewrites,
+                            state=state, step=step, cur_lr=restart_lr(), rewrite_index=n_rewrites,
                             build_optimizer=build_optimizer, clip_value=clip_value, cbs=cbs,
                             live_opt=opt if args.keep_optimizer_state else None,
                             live_params=population.object_parameters(0) if args.keep_optimizer_state else None,
@@ -403,7 +431,7 @@ def optimize(
                         if changed:
                             new_pop = grammar.collate([new_obj]).requires_grad_()
                             if args.keep_optimizer_state:
-                                new_opt, new_sched = build_optimizer(new_pop.parameters(), step, cur_lr)
+                                new_opt, new_sched = build_optimizer(new_pop.parameters(), step, restart_lr())
                                 _carry(grammar, opt, population.object_parameters(0), base_obj,
                                        new_opt, new_pop.object_parameters(0), new_obj)
                                 opt, sched = new_opt, new_sched
@@ -414,7 +442,7 @@ def optimize(
                                 if args.reset_lr_after_proposal:
                                     cur_lr = args.lr
                     if not args.keep_optimizer_state:
-                        opt, sched = build_optimizer(population.parameters(), step, cur_lr)
+                        opt, sched = build_optimizer(population.parameters(), step, restart_lr())
 
                 # -- 4. continuous step ------------------------------------
                 ctx = StepContext(
@@ -551,7 +579,7 @@ def _run_rewrite(
         out: list[float] = []
         offset = 0
         for batch in obj_batches:
-            opt, _ = build_optimizer(batch.parameters(), step, cur_lr)
+            opt, _ = build_optimizer(batch.parameters(), step, cur_lr * args.proposal_lr_mult)
             if live_opt is not None and live_params is not None:  # keep_optimizer_state: start from the live state
                 for j in range(len(batch)):
                     _carry(grammar, live_opt, live_params, base_obj, opt, batch.object_parameters(j), objs[offset + j])
@@ -561,15 +589,18 @@ def _run_rewrite(
                 losses, _ = grammar.loss(batch, make_ctx(inner, len(batch)), prop_state)
                 losses.sum().backward()
                 batch.scale_grads_()
-                cv = clip_value(cur_lr)
+                cv = clip_value(cur_lr * args.proposal_lr_mult)
                 if cv is not None:
                     torch.nn.utils.clip_grad_value_(batch.parameters(), cv)
                 opt.step()
                 batch.project_to_valid_()
         with torch.no_grad():
             for batch in obj_batches:
-                losses, _ = grammar.loss(batch, make_ctx(n_steps, len(batch)), prop_state)
-                out.extend(losses.tolist())
+                if args.proposal_eval == "grammar":
+                    out.extend(float(v) for v in grammar.proposal_score(batch, make_ctx(n_steps, len(batch)), prop_state))
+                else:
+                    losses, _ = grammar.loss(batch, make_ctx(n_steps, len(batch)), prop_state)
+                    out.extend(losses.tolist())
         return out
 
     def simplicity_of(obj_batches: list[Any]) -> list[float]:

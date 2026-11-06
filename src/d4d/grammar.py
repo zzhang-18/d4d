@@ -200,6 +200,12 @@ class Grammar(ABC, Generic[TObject, TCollection, TRewrite, TState]):
         ``ctx.compute_extra`` is True (the step phase) and ignored otherwise.
         """
 
+    def proposal_score(self, batch: TCollection, ctx: StepContext, state: TState) -> Sequence[float]:
+        """``B`` scores of candidates after their scoring steps (lower is better), used instead of ``loss`` when
+        ``OptimizeArgs.proposal_eval == "grammar"``; not differentiated. The simplicity term is added by the optimizer.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no proposal_score (OptimizeArgs.proposal_eval='grammar')")
+
     def simplicity(self, batch: TCollection, ctx: StepContext) -> Sequence[float]:
         """``B`` program-size prices; not differentiated.
 
