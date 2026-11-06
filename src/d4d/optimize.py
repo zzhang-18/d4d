@@ -63,6 +63,11 @@ class OptimizeArgs:
     Proposal scoring then starts from 'lr' too, not from the decayed end-of-round value."""
     segment_end_factor: float = 0.1
     """'CosineSegment': the LR at the end of a segment, as a fraction of 'lr'."""
+    warmup_steps: int = 0
+    """After every main-loop optimizer rebuild (start, cleanup and rewrite steps), the LR ramps linearly from
+    'lr / warmup_steps' to its scheduled value over this many steps ('none' and 'CosineSegment' schedulers). A fresh
+    Adam moves every coordinate by about 'lr' per step for its first steps whatever the gradient's size, which shakes
+    a converged state; the ramp avoids that. '0' disables."""
     lr: float = 0.5
     clip_grad: float | None = 2.0
     """Clip gradient values to [-clip_grad, clip_grad]. 'None' disables."""
@@ -99,6 +104,9 @@ class OptimizeArgs:
     proposal_steps: int = 2
     proposal_lr_mult: float = 1.0
     """The scoring optimizer's LR (all 'loss'-criterion scoring passes) as a multiple of the main loop's current LR."""
+    proposal_warmup_steps: int = 0
+    """Scoring passes ramp their LR linearly over this many steps (step k of a pass uses 'min(1, (k + 1) / W)' of
+    the scoring LR), so candidates and base are compared without a fresh optimizer's first-step shake. '0' disables."""
     proposal_eval: Literal["loss", "grammar"] = "loss"
     """What a candidate's score is after its scoring steps ('loss' criterion only): 'loss' evaluates 'Grammar.loss';
     'grammar' asks 'Grammar.proposal_score' (e.g. a hard metric of the exported object; lower is better). The
@@ -177,6 +185,10 @@ class OptimizeArgs:
             raise ValueError("proposal_eval='grammar' needs proposal_criterion='loss'")
         if not 0.0 <= self.segment_end_factor <= 1.0:
             raise ValueError(f"segment_end_factor must be in [0, 1], got {self.segment_end_factor}")
+        if self.warmup_steps < 0 or self.proposal_warmup_steps < 0:
+            raise ValueError("warmup_steps and proposal_warmup_steps must be >= 0")
+        if self.warmup_steps > 0 and self.scheduler not in ("none", "CosineSegment"):
+            raise ValueError(f"warmup_steps needs scheduler 'none' or 'CosineSegment', not {self.scheduler!r}")
 
 
 @dataclass
@@ -299,9 +311,10 @@ def optimize(
         seed_everything(args.seed)
 
     def build_optimizer(
-        parameters: list[torch.Tensor], cur_step: int, lr: float
+        parameters: list[torch.Tensor], cur_step: int, lr: float, main: bool = True
     ) -> tuple[Optimizer, LRScheduler | None]:
-        """A fresh optimizer and scheduler over ``parameters`` (leaf tensors, any shape)."""
+        """A fresh optimizer and scheduler over ``parameters`` (leaf tensors, any shape); ``main``: a main-loop
+        rebuild (the only kind 'warmup_steps' applies to; scoring passes never step the scheduler)."""
         if args.optimizer == "Adam":
             opt: Optimizer = torch.optim.Adam(parameters, lr=lr)
         elif args.optimizer == "SGD":
@@ -328,12 +341,18 @@ def optimize(
             sched = ExponentialLR(opt, gamma=0.01 ** (1 / args.n_steps))
         elif args.scheduler == "CosineSegment":
             seg_len, end = max(min(args.propose_every, args.cleanup_every), 1), args.segment_end_factor
-            sched = LambdaLR(opt, lambda t: end + (1.0 - end) * 0.5 * (1.0 + math.cos(math.pi * min(t, seg_len) / seg_len)))
+            warm = args.warmup_steps if main else 0
+            sched = LambdaLR(opt, lambda t: (end + (1.0 - end) * 0.5 * (1.0 + math.cos(math.pi * min(t, seg_len) / seg_len)))
+                             * (min(1.0, (t + 1) / warm) if warm > 0 else 1.0))
+        if main and args.warmup_steps > 0 and args.scheduler == "none":
+            warm = args.warmup_steps
+            sched = LambdaLR(opt, lambda t: min(1.0, (t + 1) / warm))
         return opt, sched
 
     def restart_lr() -> float:
-        """The LR a main-loop rebuild starts from: 'lr' with warm restarts ('CosineSegment'), else the current one."""
-        return args.lr if args.scheduler == "CosineSegment" else cur_lr
+        """The LR a main-loop rebuild starts from: 'lr' with warm restarts ('CosineSegment') or a warmup (whose ramp
+        must restart from the base LR, not from a ramped value), else the current one."""
+        return args.lr if args.scheduler == "CosineSegment" or args.warmup_steps > 0 else cur_lr
 
     def clip_value(lr: float) -> float | None:
         if args.clip_grad is None:
@@ -579,12 +598,16 @@ def _run_rewrite(
         out: list[float] = []
         offset = 0
         for batch in obj_batches:
-            opt, _ = build_optimizer(batch.parameters(), step, cur_lr * args.proposal_lr_mult)
+            score_lr = cur_lr * args.proposal_lr_mult
+            opt, _ = build_optimizer(batch.parameters(), step, score_lr, main=False)
             if live_opt is not None and live_params is not None:  # keep_optimizer_state: start from the live state
                 for j in range(len(batch)):
                     _carry(grammar, live_opt, live_params, base_obj, opt, batch.object_parameters(j), objs[offset + j])
             offset += len(batch)
             for inner in range(n_steps):
+                if args.proposal_warmup_steps > 0:
+                    for group in opt.param_groups:
+                        group["lr"] = score_lr * min(1.0, (inner + 1) / args.proposal_warmup_steps)
                 opt.zero_grad()
                 losses, _ = grammar.loss(batch, make_ctx(inner, len(batch)), prop_state)
                 losses.sum().backward()

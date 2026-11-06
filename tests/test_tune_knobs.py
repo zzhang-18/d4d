@@ -114,3 +114,34 @@ def test_validation():
         base_args(proposal_lr_mult=0.0)
     with pytest.raises(ValueError):
         base_args(segment_end_factor=1.5)
+
+
+def test_warmup_ramps_after_every_rebuild():
+    rec = Recorder()
+    optimize(PiecewiseGrammar(step_target(64)), base_args(warmup_steps=5), [rec])
+    for s, lr in enumerate(rec.lrs):  # rebuilds at every multiple of 20 (cleanup / rewrite steps)
+        assert lr == pytest.approx(0.1 * min(1.0, (s % 20 + 2) / 5)), s  # StepEnd: after the step's scheduler update
+
+
+def test_warmup_with_cosine_segment_composes():
+    rec = Recorder()
+    optimize(PiecewiseGrammar(step_target(64)), base_args(warmup_steps=5, scheduler="CosineSegment", segment_end_factor=0.1), [rec])
+    for s, lr in enumerate(rec.lrs):
+        t = s % 20 + 1
+        cos = 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(t, 20) / 20))
+        assert lr == pytest.approx(0.1 * cos * min(1.0, (t + 1) / 5)), s
+
+
+def test_proposal_warmup_changes_scores_not_the_main_loop():
+    r1, r2 = Recorder(), Recorder()
+    optimize(PiecewiseGrammar(step_target(64)), base_args(n_steps=21), [r1])
+    optimize(PiecewiseGrammar(step_target(64)), base_args(n_steps=21, proposal_warmup_steps=10), [r2])
+    assert r1.lrs[:20] == r2.lrs[:20]
+    assert r1.rewrites[0].losses != r2.rewrites[0].losses
+
+
+def test_warmup_validation():
+    with pytest.raises(ValueError):
+        base_args(warmup_steps=5, scheduler="LinearLR")
+    with pytest.raises(ValueError):
+        base_args(proposal_warmup_steps=-1)
