@@ -53,6 +53,12 @@ class OptimizeArgs:
     """Hyperparameters for :func:`optimize`."""
 
     n_steps: int = 4000
+    start_step: int = 0
+    """Resume a run at this step: the loop runs steps 'start_step' .. 'n_steps - 1' from 'Grammar.initial()', and every
+    'StepContext' carries the absolute step (and 'total_steps = n_steps'), so step-keyed schedules and triggers fire
+    as in the full run. The first step's cleanup and 'step'-triggered rewrite fire if they fall on it (a run resumed
+    at an event step re-runs that event); its stall check has no history and counts as not stalled. Optimizer state
+    starts fresh, and a scheduler starts at 'start_step' ('LinearLR' spans the remaining steps). '0' is a fresh run."""
 
     # GD-related
     optimizer: Literal["Adam", "SGD"] = "Adam"
@@ -163,6 +169,8 @@ class OptimizeArgs:
     def __post_init__(self) -> None:
         if self.n_steps < 1:
             raise ValueError(f"n_steps must be >= 1, got {self.n_steps}")
+        if not 0 <= self.start_step < self.n_steps:
+            raise ValueError(f"start_step must be in [0, n_steps), got {self.start_step} with n_steps {self.n_steps}")
         if self.propose_every < 1:
             raise ValueError(f"propose_every must be >= 1, got {self.propose_every}")
         if self.cleanup_every < 1:
@@ -368,7 +376,7 @@ def optimize(
     population: TCollection = grammar.collate([initial_obj]).requires_grad_()
     state: TState = grammar.init_state()
 
-    opt, sched = build_optimizer(population.parameters(), cur_step=0, lr=args.lr)
+    opt, sched = build_optimizer(population.parameters(), cur_step=args.start_step, lr=args.lr)
     cur_lr = float(sched.get_last_lr()[0]) if sched is not None else args.lr
 
     ma_loss = MovingAverage(window_size=8)
@@ -387,7 +395,7 @@ def optimize(
     best_step = 0
     n_rewrites = 0
     stopped_early = False
-    step = 0
+    step = args.start_step
 
     result: OptimizeResult[TObject] | None = None
     error: BaseException | None = None
@@ -396,7 +404,7 @@ def optimize(
     # TODO: is the double try here a good pattern?
     try:
         try:
-            for step in range(args.n_steps):
+            for step in range(args.start_step, args.n_steps):
                 # -- 1. is this a rewrite step? ----------------------------
                 if step == 0:
                     rewrite = False
@@ -427,13 +435,15 @@ def optimize(
 
                 # -- 3. rewrite --------------------------------------------
                 if rewrite:
-                    # stall check: moving-average loss vs. its lowest value at earlier rewrite events
-                    cur_ma = series["$loss_ma"][-1]
-                    if cur_ma > loss_since_last_rewrite * (1 - args.stopping_eps):
-                        stopping_patience += 1
-                    else:
-                        stopping_patience = 0
-                    loss_since_last_rewrite = min(loss_since_last_rewrite, cur_ma)
+                    # stall check: moving-average loss vs. its lowest value at earlier rewrite events (no history yet
+                    # on the first step of a resumed run: not stalled)
+                    if series["$loss_ma"]:
+                        cur_ma = series["$loss_ma"][-1]
+                        if cur_ma > loss_since_last_rewrite * (1 - args.stopping_eps):
+                            stopping_patience += 1
+                        else:
+                            stopping_patience = 0
+                        loss_since_last_rewrite = min(loss_since_last_rewrite, cur_ma)
                     ma_loss.clear()
 
                     if args.stopping_patience is not None and stopping_patience >= args.stopping_patience:
